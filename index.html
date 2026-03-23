@@ -47,9 +47,9 @@ async function fbLoad(url) {
 }
 async function fbSave(url, data) { await fbPut(url, "lmc", data); }
 
-// ── Claude API ────────────────────────────────────────────────────
-function getApiKey() { return localStorage.getItem("lcq_apikey")||""; }
-function setApiKey(k) { localStorage.setItem("lcq_apikey",k); }
+// ── localStorage helpers (safe) ───────────────────────────────────
+function getApiKey() { try { return localStorage.getItem("lcq_apikey")||""; } catch { return ""; } }
+function setApiKey(k) { try { localStorage.setItem("lcq_apikey",k); } catch {} }
 
 async function callClaude(prompt, maxTokens=2000) {
   const key = getApiKey();
@@ -80,8 +80,26 @@ const Tag = ({label}) => {
   return <span style={{fontSize:11,fontWeight:700,padding:"2px 8px",borderRadius:99,background:s.bg,color:s.color,border:`1px solid ${s.border}`}}>{label}</span>;
 };
 
-// ═══════════════════════════════════════════════════════════════════
-// SETUP SCREEN
+// ── Error Boundary ────────────────────────────────────────────────
+class ErrorBoundary extends React.Component {
+  constructor(props) { super(props); this.state = { error: null }; }
+  static getDerivedStateFromError(e) { return { error: e.message || "Unknown error" }; }
+  render() {
+    if (this.state.error) return (
+      <div style={{minHeight:"100vh",display:"flex",alignItems:"center",justifyContent:"center",background:"#f8fafc",padding:16}}>
+        <div style={{background:"white",borderRadius:12,padding:32,maxWidth:480,width:"100%",boxShadow:"0 4px 16px rgba(0,0,0,.1)",textAlign:"center"}}>
+          <div style={{fontSize:48,marginBottom:12}}>⚠️</div>
+          <h2 style={{color:"#dc2626",marginBottom:8}}>Something went wrong</h2>
+          <div style={{background:"#fef2f2",border:"1px solid #fca5a5",borderRadius:8,padding:"10px 14px",fontSize:13,color:"#dc2626",marginBottom:16,textAlign:"left",wordBreak:"break-all"}}>{this.state.error}</div>
+          <button onClick={()=>window.location.reload()} style={{background:"#1d4ed8",color:"white",border:"none",borderRadius:8,padding:"10px 24px",cursor:"pointer",fontWeight:700,fontSize:14}}>🔄 Reload App</button>
+        </div>
+      </div>
+    );
+    return this.props.children;
+  }
+}
+
+
 // ═══════════════════════════════════════════════════════════════════
 function SetupScreen({onReady}) {
   const [dbInput,setDbInput]=useState(""); const [loading,setLoading]=useState(false);
@@ -467,13 +485,22 @@ function TeacherArea({classes,updCls,quizzes,updQz,auth,updAuth,logs}) {
   const [apiKey,setApiKeyState]=useState(getApiKey);
   const saveApiKey=()=>{ setApiKey(apiKey.trim()); alert("API key saved!"); };
 
-  const login=async()=>{
-    if(!pw.trim()) return;
+  const login = async () => {
+    if (!pw.trim()) return;
     setLoginBusy(true); setLoginErr("");
-    const hash=await sha256(pw);
-    const stored=auth?.pwHash||null;
-    if(!stored){ updAuth({pwHash:hash}); setAuthed(true); setPw(""); }
-    else { if(hash===stored){setAuthed(true);setPw("");}else setLoginErr("Wrong password."); }
+    try {
+      const hash = await sha256(pw);
+      const stored = auth?.pwHash || null;
+      if (!stored) {
+        updAuth({pwHash: hash});
+        setAuthed(true); setPw("");
+      } else {
+        if (hash === stored) { setAuthed(true); setPw(""); }
+        else setLoginErr("Wrong password.");
+      }
+    } catch(e) {
+      setLoginErr("Login error: " + e.message);
+    }
     setLoginBusy(false);
   };
 
@@ -819,7 +846,9 @@ function LogsArea({logs}) {
   );
 }
 
-ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+ReactDOM.createRoot(document.getElementById("root")).render(
+  <ErrorBoundary><App/></ErrorBoundary>
+);
 </script>
 </body>
 </html>
