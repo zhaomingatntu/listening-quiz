@@ -18,10 +18,14 @@ const { useState, useEffect, useRef, useCallback } = React;
 const DEFAULT_DB = "";
 const MODEL = "claude-sonnet-4-6";
 
+// ── localStorage (safe) ───────────────────────────────────────────
+function getApiKey() { try { return localStorage.getItem("lcq_apikey") || ""; } catch { return ""; } }
+function saveApiKey(k) { try { localStorage.setItem("lcq_apikey", k); } catch {} }
+
 // ── SHA-256 ───────────────────────────────────────────────────────
 async function sha256(str) {
   const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(str));
-  return Array.from(new Uint8Array(buf)).map(b=>b.toString(16).padStart(2,"0")).join("");
+  return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2,"0")).join("");
 }
 
 // ── Firebase REST ─────────────────────────────────────────────────
@@ -37,7 +41,7 @@ async function fbGet(url, path) {
 }
 async function fbPut(url, path, data) {
   const r = await fetch(`${url}/${path}.json`, {
-    method:"PUT", headers:{"Content-Type":"application/json"}, body:JSON.stringify(data)
+    method: "PUT", headers: {"Content-Type":"application/json"}, body: JSON.stringify(data)
   });
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
 }
@@ -47,21 +51,24 @@ async function fbLoad(url) {
 }
 async function fbSave(url, data) { await fbPut(url, "lmc", data); }
 
-// ── localStorage helpers (safe) ───────────────────────────────────
-function getApiKey() { try { return localStorage.getItem("lcq_apikey")||""; } catch { return ""; } }
-function setApiKey(k) { try { localStorage.setItem("lcq_apikey",k); } catch {} }
-
+// ── Claude API ────────────────────────────────────────────────────
 async function callClaude(prompt, maxTokens=2000) {
   const key = getApiKey();
-  if (!key) throw new Error("No API key set. Please enter your Anthropic API key in the Teacher area.");
+  if (!key) throw new Error("No API key. Please enter your Anthropic API key in the Teacher area.");
   const r = await fetch("https://api.anthropic.com/v1/messages", {
-    method:"POST", headers:{"Content-Type":"application/json","x-api-key":key,"anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"},
-    body: JSON.stringify({ model:MODEL, max_tokens:maxTokens, messages:[{role:"user",content:prompt}] })
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-api-key": key,
+      "anthropic-version": "2023-06-01",
+      "anthropic-dangerous-direct-browser-access": "true"
+    },
+    body: JSON.stringify({ model: MODEL, max_tokens: maxTokens, messages: [{role:"user",content:prompt}] })
   });
-  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  if (!r.ok) throw new Error(`API HTTP ${r.status}`);
   const d = await r.json();
   if (d.error) throw new Error(d.error.message);
-  return (d.content||[]).map(i=>i.text||"").join("").trim();
+  return (d.content||[]).map(i => i.text||"").join("").trim();
 }
 
 // ── UI helpers ────────────────────────────────────────────────────
@@ -76,7 +83,7 @@ const TAG_COLORS = {
   Purpose:{bg:"#fce7f3",color:"#9d174d",border:"#f9a8d4"},
 };
 const Tag = ({label}) => {
-  const s = TAG_COLORS[label]||{bg:"#f1f5f9",color:"#475569",border:"#cbd5e1"};
+  const s = TAG_COLORS[label] || {bg:"#f1f5f9",color:"#475569",border:"#cbd5e1"};
   return <span style={{fontSize:11,fontWeight:700,padding:"2px 8px",borderRadius:99,background:s.bg,color:s.color,border:`1px solid ${s.border}`}}>{label}</span>;
 };
 
@@ -91,7 +98,7 @@ class ErrorBoundary extends React.Component {
           <div style={{fontSize:48,marginBottom:12}}>⚠️</div>
           <h2 style={{color:"#dc2626",marginBottom:8}}>Something went wrong</h2>
           <div style={{background:"#fef2f2",border:"1px solid #fca5a5",borderRadius:8,padding:"10px 14px",fontSize:13,color:"#dc2626",marginBottom:16,textAlign:"left",wordBreak:"break-all"}}>{this.state.error}</div>
-          <button onClick={()=>window.location.reload()} style={{background:"#1d4ed8",color:"white",border:"none",borderRadius:8,padding:"10px 24px",cursor:"pointer",fontWeight:700,fontSize:14}}>🔄 Reload App</button>
+          <button onClick={()=>window.location.reload()} style={B("#1d4ed8",{padding:"10px 24px",fontSize:14})}>🔄 Reload App</button>
         </div>
       </div>
     );
@@ -99,17 +106,20 @@ class ErrorBoundary extends React.Component {
   }
 }
 
-
+// ═══════════════════════════════════════════════════════════════════
+// SETUP SCREEN
 // ═══════════════════════════════════════════════════════════════════
 function SetupScreen({onReady}) {
-  const [dbInput,setDbInput]=useState(""); const [loading,setLoading]=useState(false);
-  const [err,setErr]=useState(""); const [diagLog,setDiagLog]=useState([]);
-  const log = msg => setDiagLog(p=>[...p,msg]);
+  const [dbInput,setDbInput] = useState("");
+  const [loading,setLoading] = useState(false);
+  const [err,setErr]         = useState("");
+  const [diagLog,setDiagLog] = useState([]);
+  const log = msg => setDiagLog(p => [...p, msg]);
 
   async function connect() {
     let url = dbInput.trim().replace(/\s+/g,"").replace(/\/+$/,"").split("?")[0].split("#")[0];
     setErr(""); setDiagLog([]);
-    if (!url) { setErr("Please enter your Firebase Realtime Database URL."); return; }
+    if (!url) { setErr("Please enter your Firebase database URL."); return; }
     if (!url.startsWith("https://")) { setErr("URL must start with https://"); return; }
     setLoading(true);
     log(`🔍 Fetching: ${url}/lmc.json`);
@@ -120,24 +130,20 @@ function SetupScreen({onReady}) {
       log(`ℹ️  Fix: Firebase Console → Realtime Database → Rules → set read & write to true → Publish`);
       setErr("Failed to reach Firebase. See diagnostics below."); setLoading(false); return;
     }
-    if (r.status===401||r.status===403) {
-      log(`❌ Permission denied — update Firebase Rules.`);
-      setErr(`Permission denied (HTTP ${r.status}).`); setLoading(false); return;
-    }
+    if (r.status===401||r.status===403) { log(`❌ Permission denied.`); setErr(`Permission denied (HTTP ${r.status}).`); setLoading(false); return; }
     if (!r.ok) { log(`❌ HTTP ${r.status}`); setErr(`HTTP ${r.status} error.`); setLoading(false); return; }
     let existing;
-    try { existing=await r.json(); log(`✅ Response parsed OK`); }
+    try { existing = await r.json(); log(`✅ Response parsed OK`); }
     catch(e) { log(`❌ Invalid JSON: ${e.message}`); setErr("Invalid response."); setLoading(false); return; }
     if (!existing) {
       log(`ℹ️  Empty — initialising…`);
-      try { await fbSave(url,{classes:[],quizzes:[],logs:[],auth:{}}); log(`✅ Initialised`); }
+      try { await fbSave(url, {classes:[],quizzes:[],logs:[],auth:{}}); log(`✅ Initialised`); }
       catch(e) { log(`❌ Write failed: ${e.message}`); setErr("Read OK but write failed."); setLoading(false); return; }
     } else { log(`✅ Existing data found`); }
     log(`🚀 Launching…`);
     setDbUrlHash(url); onReady(url); setLoading(false);
   }
 
-  const inp={display:"block",width:"100%",padding:"10px 12px",borderRadius:8,border:"1px solid #d1d5db",fontSize:14,marginBottom:8};
   return (
     <div style={{minHeight:"100vh",background:"linear-gradient(135deg,#eef2ff,#f1f5f9)",display:"flex",alignItems:"center",justifyContent:"center",padding:16}}>
       <div style={{background:"#fff",borderRadius:16,boxShadow:"0 8px 32px rgba(0,0,0,.1)",padding:36,maxWidth:500,width:"100%"}}>
@@ -154,7 +160,7 @@ function SetupScreen({onReady}) {
             <span>Choose any region → <strong>Start in Test mode</strong></span>,
             <span>Copy the DB URL: <code style={{background:"#dbeafe",padding:"1px 5px",borderRadius:3}}>https://xxx-default-rtdb.firebaseio.com</code></span>,
             <span>Paste below and click Connect</span>
-          ].map((s,i)=>(
+          ].map((s,i) => (
             <div key={i} style={{display:"flex",gap:10,marginBottom:6}}>
               <span style={{fontWeight:"700",color:"#3b82f6",minWidth:18}}>{i+1}.</span><span>{s}</span>
             </div>
@@ -164,22 +170,20 @@ function SetupScreen({onReady}) {
         <input value={dbInput} onChange={e=>{setDbInput(e.target.value);setErr("");}}
           onKeyDown={e=>e.key==="Enter"&&connect()}
           placeholder="https://your-project-default-rtdb.firebaseio.com"
-          style={inp}/>
-        {err&&<div style={{color:"#dc2626",fontSize:13,marginBottom:8,padding:"8px 10px",background:"#fef2f2",borderRadius:6,border:"1px solid #fca5a5"}}>{err}</div>}
+          style={{display:"block",width:"100%",padding:"10px 12px",borderRadius:8,border:"1px solid #d1d5db",fontSize:14,marginBottom:8}}/>
+        {err && <div style={{color:"#dc2626",fontSize:13,marginBottom:8,padding:"8px 10px",background:"#fef2f2",borderRadius:6,border:"1px solid #fca5a5"}}>{err}</div>}
         <button onClick={connect} disabled={loading}
           style={{...B(loading?"#9ca3af":"#4f46e5"),width:"100%",padding:11,fontSize:15,cursor:loading?"not-allowed":"pointer"}}>
-          {loading?"⏳ Connecting…":"🔗 Connect & Launch"}
+          {loading ? "⏳ Connecting…" : "🔗 Connect & Launch"}
         </button>
-        {diagLog.length>0&&(
+        {diagLog.length > 0 && (
           <div style={{marginTop:12,background:"#0f172a",borderRadius:8,padding:"10px 14px",fontFamily:"monospace",fontSize:12,lineHeight:1.8}}>
-            {diagLog.map((l,i)=>(
+            {diagLog.map((l,i) => (
               <div key={i} style={{color:l.startsWith("❌")?"#f87171":l.startsWith("✅")||l.startsWith("🚀")?"#86efac":"#94a3b8"}}>{l}</div>
             ))}
           </div>
         )}
-        <p style={{fontSize:12,color:"#9ca3af",textAlign:"center",marginTop:10}}>
-          Bookmark the URL after connecting to return without re-entering it.
-        </p>
+        <p style={{fontSize:12,color:"#9ca3af",textAlign:"center",marginTop:10}}>Bookmark the URL after connecting to return without re-entering.</p>
       </div>
     </div>
   );
@@ -189,25 +193,31 @@ function SetupScreen({onReady}) {
 // AUDIO PLAYER
 // ═══════════════════════════════════════════════════════════════════
 function AudioPlayer({text}) {
-  const [playing,setPlaying]=useState(false); const [times,setTimes]=useState(0);
-  const [rate,setRate]=useState(0.85);
-  const play=()=>{ speechSynthesis.cancel(); const u=new SpeechSynthesisUtterance(text);
-    u.lang="en-US"; u.rate=rate; u.onstart=()=>setPlaying(true);
-    u.onend=()=>{setPlaying(false);setTimes(t=>t+1);}; speechSynthesis.speak(u); };
-  const stop=()=>{ speechSynthesis.cancel(); setPlaying(false); };
+  const [playing,setPlaying] = useState(false);
+  const [times,setTimes]     = useState(0);
+  const [rate,setRate]       = useState(0.85);
+  const play = () => {
+    speechSynthesis.cancel();
+    const u = new SpeechSynthesisUtterance(text);
+    u.lang="en-US"; u.rate=rate;
+    u.onstart=()=>setPlaying(true);
+    u.onend=()=>{setPlaying(false);setTimes(t=>t+1);};
+    speechSynthesis.speak(u);
+  };
+  const stop = () => { speechSynthesis.cancel(); setPlaying(false); };
   return (
     <div style={{background:"linear-gradient(135deg,#1e40af,#2563eb)",color:"white",borderRadius:10,padding:"14px 18px",marginBottom:18,display:"flex",alignItems:"center",gap:12,flexWrap:"wrap"}}>
       <span style={{fontSize:22}}>🎧</span>
       <div style={{flex:1}}>
         <div style={{fontWeight:700,fontSize:14}}>Listen to the passage</div>
-        <div style={{fontSize:12,opacity:.8,marginTop:2}}>{times>0?`Played ${times}×`:"Not yet played"} · You may listen as many times as you wish</div>
+        <div style={{fontSize:12,opacity:.8,marginTop:2}}>{times>0?`Played ${times}×`:"Not yet played"} · Listen as many times as you wish</div>
       </div>
       <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
         <input type="range" min={0.5} max={1.5} step={0.1} value={rate} onChange={e=>setRate(+e.target.value)} style={{width:80}}/>
         <span style={{fontSize:12,minWidth:28}}>{rate}×</span>
         {!playing
-          ?<button onClick={play} style={{background:"white",color:"#1d4ed8",border:"none",borderRadius:7,padding:"7px 16px",cursor:"pointer",fontWeight:800,fontSize:13}}>▶ Play</button>
-          :<button onClick={stop} style={{background:"#dc2626",color:"white",border:"none",borderRadius:7,padding:"7px 14px",cursor:"pointer",fontWeight:800,fontSize:13}}>■ Stop</button>}
+          ? <button onClick={play} style={{background:"white",color:"#1d4ed8",border:"none",borderRadius:7,padding:"7px 16px",cursor:"pointer",fontWeight:800,fontSize:13}}>▶ Play</button>
+          : <button onClick={stop} style={{background:"#dc2626",color:"white",border:"none",borderRadius:7,padding:"7px 14px",cursor:"pointer",fontWeight:800,fontSize:13}}>■ Stop</button>}
         {times>0&&!playing&&<button onClick={play} style={{background:"rgba(255,255,255,.2)",color:"white",border:"1px solid rgba(255,255,255,.4)",borderRadius:7,padding:"7px 12px",cursor:"pointer",fontSize:12}}>↺</button>}
       </div>
     </div>
@@ -218,36 +228,39 @@ function AudioPlayer({text}) {
 // FEEDBACK PANEL
 // ═══════════════════════════════════════════════════════════════════
 function FeedbackPanel({quiz, userAnswers}) {
-  const [data,setData]=useState(null); const [loading,setLoading]=useState(true);
-  const [showText,setShowText]=useState(false); const [textTr,setTextTr]=useState(""); const [loadingTr,setLoadingTr]=useState(false);
+  const [data,setData]         = useState(null);
+  const [loading,setLoading]   = useState(true);
+  const [showText,setShowText] = useState(false);
+  const [textTr,setTextTr]     = useState("");
+  const [loadingTr,setLoadingTr] = useState(false);
 
   useEffect(()=>{
-    const qLines=quiz.questions.map((q,i)=>
+    const qLines = quiz.questions.map((q,i)=>
       `Q${i+1} [${q.type}]: ${q.question}\nOptions: ${q.options.map((o,j)=>`${String.fromCharCode(65+j)}) ${o}`).join(" | ")}\nCorrect: ${String.fromCharCode(65+q.correctIndex)}\nUser chose: ${String.fromCharCode(65+userAnswers[i])}`
     ).join("\n\n");
-    const prompt=`You are a TOEFL listening expert. For each question below provide: whether user was correct, a 2–3 sentence English explanation, and a Traditional Chinese (繁體中文) translation of that explanation.\nReturn ONLY valid JSON, no markdown:\n{"items":[{"correct":true,"explanation":"...","explanationZH":"..."}]}\n\n${qLines}`;
-    callClaude(prompt,3000)
-      .then(raw=>{setData(JSON.parse(raw.replace(/```json|```/g,"").trim()));})
-      .catch(()=>setData({error:true}))
-      .finally(()=>setLoading(false));
+    const prompt = `You are a TOEFL listening expert. For each question provide: whether user was correct, a 2–3 sentence English explanation, and a Traditional Chinese (繁體中文) translation.\nReturn ONLY valid JSON, no markdown:\n{"items":[{"correct":true,"explanation":"...","explanationZH":"..."}]}\n\n${qLines}`;
+    callClaude(prompt, 3000)
+      .then(raw => { setData(JSON.parse(raw.replace(/```json|```/g,"").trim())); })
+      .catch(() => setData({error:true}))
+      .finally(() => setLoading(false));
   },[]);
 
-  const handleShowText=async()=>{
-    setShowText(true); if(textTr) return; setLoadingTr(true);
-    try { const t=await callClaude(`Translate to Traditional Chinese (繁體中文). Return only the translation.\n\n${quiz.originalText}`,1000); setTextTr(t); }
+  const handleShowText = async () => {
+    setShowText(true); if (textTr) return; setLoadingTr(true);
+    try { const t = await callClaude(`Translate to Traditional Chinese (繁體中文). Return only the translation.\n\n${quiz.originalText}`, 1000); setTextTr(t); }
     catch { setTextTr("（翻譯失敗）"); }
     setLoadingTr(false);
   };
 
-  const total=quiz.questions.length;
-  const correct=data&&!data.error?data.items.filter(i=>i.correct).length:0;
+  const total   = quiz.questions.length;
+  const correct = data && !data.error ? data.items.filter(i=>i.correct).length : 0;
   return (
     <div style={{marginTop:8}}>
       <div style={{background:"linear-gradient(135deg,#1e40af,#2563eb)",color:"white",borderRadius:10,padding:"16px 20px",marginBottom:18}}>
         <div style={{fontSize:26,fontWeight:800}}>{loading?"Scoring…":`🎉 ${correct} / ${total}`}</div>
         <div style={{fontSize:13,opacity:.85}}>{loading?"Generating feedback with AI…":`${Math.round(correct/total*100)}% accuracy`}</div>
       </div>
-      {loading&&<div style={{textAlign:"center",padding:32,color:"#64748b"}}><div style={{fontSize:28,marginBottom:8}}>⏳</div>Generating explanations &amp; translations…</div>}
+      {loading && <div style={{textAlign:"center",padding:32,color:"#64748b"}}><div style={{fontSize:28,marginBottom:8}}>⏳</div>Generating explanations &amp; translations…</div>}
       {data&&!data.error&&quiz.questions.map((q,i)=>{
         const fb=data.items[i]; const ua=userAnswers[i];
         return (
@@ -259,7 +272,7 @@ function FeedbackPanel({quiz, userAnswers}) {
             <div style={{fontWeight:600,color:"#1e293b",fontSize:14,marginBottom:10,lineHeight:1.6}}>{q.question}</div>
             <div style={{display:"flex",flexDirection:"column",gap:5,marginBottom:10}}>
               {q.options.map((opt,j)=>{
-                const isC=j===q.correctIndex,isU=j===ua;
+                const isC=j===q.correctIndex, isU=j===ua;
                 let bg="#f8fafc",border="#e2e8f0",color="#374151";
                 if(isC){bg="#dcfce7";border="#22c55e";color="#15803d";}
                 else if(isU){bg="#fee2e2";border="#ef4444";color="#dc2626";}
@@ -281,7 +294,7 @@ function FeedbackPanel({quiz, userAnswers}) {
           </div>
         );
       })}
-      {data?.error&&<div style={{color:"#dc2626",padding:14,background:"#fee2e2",borderRadius:8}}>❌ Could not load feedback.</div>}
+      {data?.error && <div style={{color:"#dc2626",padding:14,background:"#fee2e2",borderRadius:8}}>❌ Could not load feedback.</div>}
       {data&&!data.error&&(
         <div style={{marginTop:8}}>
           <button onClick={handleShowText} style={{background:"#f1f5f9",border:"1px solid #e2e8f0",borderRadius:7,padding:"9px 16px",cursor:"pointer",fontWeight:700,fontSize:13,color:"#1e3a8a",width:"100%",marginBottom:showText?10:0}}>
@@ -300,36 +313,80 @@ function FeedbackPanel({quiz, userAnswers}) {
 }
 
 // ═══════════════════════════════════════════════════════════════════
+// TEXT CARD
+// ═══════════════════════════════════════════════════════════════════
+function TextCard({q, idx}) {
+  const [expanded,setExpanded] = useState(false);
+  const [playing,setPlaying]   = useState(false);
+  const wc = q.originalText.trim().split(/\s+/).length;
+  const play = () => {
+    speechSynthesis.cancel();
+    const u = new SpeechSynthesisUtterance(q.originalText);
+    u.lang="en-US"; u.rate=0.85;
+    u.onstart=()=>setPlaying(true); u.onend=()=>setPlaying(false);
+    speechSynthesis.speak(u);
+  };
+  const stop = () => { speechSynthesis.cancel(); setPlaying(false); };
+  return (
+    <div style={{...CARD,padding:0,overflow:"hidden"}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"12px 14px",background:"#f8fafc",borderBottom:expanded?"1px solid #e2e8f0":"none",flexWrap:"wrap",gap:8}}>
+        <div style={{flex:1}}>
+          <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:3}}>
+            <span style={{background:"#1d4ed8",color:"white",borderRadius:5,fontWeight:800,fontSize:11,padding:"1px 7px"}}>#{idx+1}</span>
+            <span style={{fontWeight:700,color:"#1e3a8a"}}>{q.title}</span>
+            <span style={{fontSize:11,padding:"1px 7px",borderRadius:99,background:q.available?"#dcfce7":"#fee2e2",color:q.available?"#15803d":"#dc2626",fontWeight:700}}>{q.available?"● Live":"● Hidden"}</span>
+          </div>
+          <div style={{fontSize:12,color:"#6b7280"}}>CEFR {q.cefr} · {wc} words · {q.topic}</div>
+        </div>
+        <div style={{display:"flex",gap:6}}>
+          {!playing?<button onClick={play} style={B("#1d4ed8",{padding:"5px 12px",fontSize:13})}>▶ Play</button>
+                   :<button onClick={stop} style={B("#dc2626",{padding:"5px 12px",fontSize:13})}>■ Stop</button>}
+          <button onClick={()=>setExpanded(e=>!e)} style={{padding:"5px 10px",background:"#eff6ff",color:"#1d4ed8",border:"1px solid #bfdbfe",borderRadius:6,cursor:"pointer",fontSize:12,fontWeight:700}}>
+            {expanded?"▲ Hide":"▼ Show"}
+          </button>
+        </div>
+      </div>
+      {expanded&&<div style={{padding:"14px 16px"}}>
+        <div style={{fontSize:11,fontWeight:700,color:"#94a3b8",letterSpacing:.8,marginBottom:8}}>PASSAGE TEXT</div>
+        <div style={{fontSize:14,color:"#1e293b",lineHeight:2,whiteSpace:"pre-wrap"}}>{q.originalText}</div>
+      </div>}
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════
 // ROOT APP
 // ═══════════════════════════════════════════════════════════════════
 function App() {
-  const [dbUrl,setDbUrlState]=useState(getDbUrl);
-  const [db,setDb]=useState(null); const [tab,setTab]=useState("student");
-  const [saving,setSaving]=useState(false); const [saveErr,setSaveErr]=useState("");
-  const timer=useRef(null);
+  const [dbUrl,setDbUrlState] = useState(getDbUrl);
+  const [db,setDb]             = useState(null);
+  const [tab,setTab]           = useState("student");
+  const [saving,setSaving]     = useState(false);
+  const [saveErr,setSaveErr]   = useState("");
+  const timer = useRef(null);
 
   useEffect(()=>{
-    if(!dbUrl) return;
+    if (!dbUrl) return;
     fbLoad(dbUrl).then(setDb).catch(e=>setSaveErr("Load error: "+e.message));
   },[dbUrl]);
 
-  const persist=useCallback((newDb)=>{
-    if(!dbUrl) return;
-    if(timer.current) clearTimeout(timer.current);
-    timer.current=setTimeout(async()=>{
+  const persist = useCallback((newDb)=>{
+    if (!dbUrl) return;
+    if (timer.current) clearTimeout(timer.current);
+    timer.current = setTimeout(async()=>{
       setSaving(true); setSaveErr("");
-      try { await fbSave(dbUrl,newDb); }
+      try { await fbSave(dbUrl, newDb); }
       catch(e) { setSaveErr("⚠️ Save failed: "+e.message); }
       setSaving(false);
-    },600);
+    }, 600);
   },[dbUrl]);
 
-  const updateDb=useCallback((fn)=>{
+  const updateDb = useCallback((fn)=>{
     setDb(prev=>{ const next=fn(prev); persist(next); return next; });
   },[persist]);
 
-  if(!dbUrl) return <SetupScreen onReady={url=>{setDbUrlHash(url);setDbUrlState(url);}}/>;
-  if(!db) return (
+  if (!dbUrl) return <SetupScreen onReady={url=>{setDbUrlHash(url);setDbUrlState(url);}}/>;
+  if (!db) return (
     <div style={{minHeight:"100vh",display:"flex",alignItems:"center",justifyContent:"center",background:"#f8fafc"}}>
       <div style={{textAlign:"center"}}><div style={{fontSize:48,marginBottom:12}}>⏳</div>
         <p style={{color:"#6b7280"}}>Loading…</p>
@@ -338,11 +395,11 @@ function App() {
     </div>
   );
 
-  const {classes=[],quizzes=[],logs=[],auth={}}=db;
-  const updCls=c=>updateDb(d=>({...d,classes:c}));
-  const updQz=q=>updateDb(d=>({...d,quizzes:q}));
-  const addLog=entry=>updateDb(d=>({...d,logs:[entry,...(d.logs||[])]}));
-  const updAuth=a=>updateDb(d=>({...d,auth:a}));
+  const {classes=[],quizzes=[],logs=[],auth={}} = db;
+  const updCls  = c => updateDb(d=>({...d,classes:c}));
+  const updQz   = q => updateDb(d=>({...d,quizzes:q}));
+  const addLog  = entry => updateDb(d=>({...d,logs:[entry,...(d.logs||[])]}));
+  const updAuth = a => updateDb(d=>({...d,auth:a}));
 
   const TABS=[["student","🎓 Student"],["teacher","👩‍🏫 Teacher"],["logs","📊 Logs"]];
   return (
@@ -360,9 +417,9 @@ function App() {
             fontWeight:tab===k?"700":"400",fontSize:14,transition:"all .15s"}}>{l}</button>
         ))}
       </div>
-      {tab==="student"&&<StudentArea classes={classes} quizzes={quizzes} addLog={addLog}/>}
-      {tab==="teacher"&&<TeacherArea classes={classes} updCls={updCls} quizzes={quizzes} updQz={updQz} auth={auth} updAuth={updAuth} logs={logs}/>}
-      {tab==="logs"&&<LogsArea logs={logs}/>}
+      {tab==="student" && <StudentArea classes={classes} quizzes={quizzes} addLog={addLog}/>}
+      {tab==="teacher" && <TeacherArea classes={classes} updCls={updCls} quizzes={quizzes} updQz={updQz} auth={auth} updAuth={updAuth} logs={logs}/>}
+      {tab==="logs"    && <LogsArea logs={logs}/>}
     </div>
   );
 }
@@ -371,31 +428,36 @@ function App() {
 // STUDENT AREA
 // ═══════════════════════════════════════════════════════════════════
 function StudentArea({classes,quizzes,addLog}) {
-  const [cls,setCls]=useState(""); const [sid,setSid]=useState(""); const [activeQuiz,setActiveQuiz]=useState(null);
-  const [userAnswers,setUserAnswers]=useState({}); const [submitted,setSubmitted]=useState(false);
-  const available=quizzes.filter(q=>q.available);
+  const [cls,setCls]               = useState("");
+  const [sid,setSid]               = useState("");
+  const [activeQuiz,setActiveQuiz] = useState(null);
+  const [userAnswers,setUserAnswers]= useState({});
+  const [submitted,setSubmitted]   = useState(false);
+  const available = quizzes.filter(q=>q.available);
 
-  const startQuiz=q=>{setActiveQuiz(q);setUserAnswers({});setSubmitted(false);};
-  const resetQuiz=()=>{setActiveQuiz(null);speechSynthesis.cancel();};
-  const allAnswered=activeQuiz&&Object.keys(userAnswers).length===activeQuiz.questions.length;
+  const startQuiz = q => { setActiveQuiz(q); setUserAnswers({}); setSubmitted(false); };
+  const resetQuiz = () => { setActiveQuiz(null); speechSynthesis.cancel(); };
+  const allAnswered = activeQuiz && Object.keys(userAnswers).length===activeQuiz.questions.length;
 
-  const handleSubmit=()=>{
+  const handleSubmit = () => {
     setSubmitted(true);
-    const correctCount=activeQuiz.questions.filter((q,i)=>userAnswers[i]===q.correctIndex).length;
-    if(sid.trim()) addLog({
-      classId:cls||"—", studentId:sid.trim(), quizTitle:activeQuiz.title,
-      quizId:activeQuiz.id, score:`${correctCount}/${activeQuiz.questions.length}`,
-      correctCount, totalCount:activeQuiz.questions.length,
-      responses:activeQuiz.questions.map((_,i)=>userAnswers[i]??-1),
-      timestamp:new Date().toLocaleString("zh-TW",{hour12:false})
+    const correctCount = activeQuiz.questions.filter((q,i)=>userAnswers[i]===q.correctIndex).length;
+    if (sid.trim()) addLog({
+      classId: cls||"—", studentId: sid.trim(), quizTitle: activeQuiz.title,
+      quizId: activeQuiz.id, score: `${correctCount}/${activeQuiz.questions.length}`,
+      correctCount, totalCount: activeQuiz.questions.length,
+      responses: activeQuiz.questions.map((_,i)=>userAnswers[i]??-1),
+      timestamp: new Date().toLocaleString("zh-TW",{hour12:false})
     });
   };
 
-  if(activeQuiz) return (
+  if (activeQuiz) return (
     <div>
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
-        <div><div style={{fontWeight:700,color:"#1e3a8a",fontSize:16}}>{activeQuiz.title}</div>
-          <div style={{fontSize:12,color:"#94a3b8"}}>{activeQuiz.questions.length} questions · CEFR {activeQuiz.cefr}</div></div>
+        <div>
+          <div style={{fontWeight:700,color:"#1e3a8a",fontSize:16}}>{activeQuiz.title}</div>
+          <div style={{fontSize:12,color:"#94a3b8"}}>{activeQuiz.questions.length} questions · CEFR {activeQuiz.cefr}</div>
+        </div>
         {!submitted&&<button onClick={resetQuiz} style={{background:"#e2e8f0",border:"none",borderRadius:6,padding:"6px 12px",cursor:"pointer",fontSize:13}}>← Back</button>}
       </div>
       <AudioPlayer text={activeQuiz.originalText}/>
@@ -434,14 +496,14 @@ function StudentArea({classes,quizzes,addLog}) {
         <div style={{fontWeight:"600",marginBottom:10,color:"#374151"}}>Student Identity</div>
         <div style={{display:"flex",gap:12,flexWrap:"wrap"}}>
           <div style={{flex:1,minWidth:140}}>
-            <label style={{fontSize:12,color:"#6b7280"}}>Class（optional）</label>
+            <label style={{fontSize:12,color:"#6b7280"}}>Class (optional)</label>
             <select value={cls} onChange={e=>setCls(e.target.value)} style={{display:"block",width:"100%",marginTop:4,padding:"7px 10px",borderRadius:6,border:"1px solid #d1d5db",fontSize:14}}>
               <option value="">— Select class —</option>
               {classes.map(c=><option key={c}>{c}</option>)}
             </select>
           </div>
           <div style={{flex:1,minWidth:140}}>
-            <label style={{fontSize:12,color:"#6b7280"}}>Student ID（optional）</label>
+            <label style={{fontSize:12,color:"#6b7280"}}>Student ID (optional)</label>
             <input value={sid} onChange={e=>setSid(e.target.value)} placeholder="e.g. B11234567"
               style={{display:"block",width:"100%",marginTop:4,padding:"7px 10px",borderRadius:6,border:"1px solid #d1d5db",fontSize:14}}/>
           </div>
@@ -475,45 +537,53 @@ function StudentArea({classes,quizzes,addLog}) {
 // TEACHER AREA
 // ═══════════════════════════════════════════════════════════════════
 function TeacherArea({classes,updCls,quizzes,updQz,auth,updAuth,logs}) {
-  const [authed,setAuthed]=useState(false); const [pw,setPw]=useState("");
-  const [loginBusy,setLoginBusy]=useState(false); const [loginErr,setLoginErr]=useState("");
-  const [section,setSection]=useState("quizzes");
-  const [changingPw,setChangingPw]=useState(false); const [newPw,setNewPw]=useState(""); const [newPw2,setNewPw2]=useState(""); const [pwMsg,setPwMsg]=useState("");
-  const [newCls,setNewCls]=useState("");
-  const [tTitle,setTTitle]=useState(""); const [tTopic,setTTopic]=useState(""); const [tWords,setTWords]=useState(""); const [tCEFR,setTCEFR]=useState("");
-  const [generating,setGenerating]=useState(false); const [genMsg,setGenMsg]=useState("");
-  const [apiKey,setApiKeyState]=useState(getApiKey);
-  const saveApiKey=()=>{ setApiKey(apiKey.trim()); alert("API key saved!"); };
+  const [authed,setAuthed]         = useState(false);
+  const [pw,setPw]                 = useState("");
+  const [loginBusy,setLoginBusy]   = useState(false);
+  const [loginErr,setLoginErr]     = useState("");
+  const [section,setSection]       = useState("quizzes");
+  const [changingPw,setChangingPw] = useState(false);
+  const [newPw,setNewPw]           = useState("");
+  const [newPw2,setNewPw2]         = useState("");
+  const [pwMsg,setPwMsg]           = useState("");
+  const [newCls,setNewCls]         = useState("");
+  const [tTitle,setTTitle]         = useState("");
+  const [tTopic,setTTopic]         = useState("");
+  const [tWords,setTWords]         = useState("");
+  const [tCEFR,setTCEFR]           = useState("");
+  const [generating,setGenerating] = useState(false);
+  const [genMsg,setGenMsg]         = useState("");
+  const [selQuiz,setSelQuiz]       = useState("");
+  const [apiKeyInput,setApiKeyInput] = useState(getApiKey);
+  const [apiKeySaved,setApiKeySaved] = useState(!!getApiKey());
+
+  const handleSaveApiKey = () => {
+    saveApiKey(apiKeyInput.trim());
+    setApiKeySaved(true);
+    alert("API key saved!");
+  };
 
   const login = async () => {
     if (!pw.trim()) return;
     setLoginBusy(true); setLoginErr("");
     try {
-      const hash = await sha256(pw);
+      const hash   = await sha256(pw);
       const stored = auth?.pwHash || null;
-      if (!stored) {
-        updAuth({pwHash: hash});
-        setAuthed(true); setPw("");
-      } else {
-        if (hash === stored) { setAuthed(true); setPw(""); }
-        else setLoginErr("Wrong password.");
-      }
-    } catch(e) {
-      setLoginErr("Login error: " + e.message);
-    }
+      if (!stored) { updAuth({pwHash:hash}); setAuthed(true); setPw(""); }
+      else { if (hash===stored) { setAuthed(true); setPw(""); } else setLoginErr("Wrong password."); }
+    } catch(e) { setLoginErr("Login error: "+e.message); }
     setLoginBusy(false);
   };
 
-  const changePassword=async()=>{
-    if(!newPw.trim()){setPwMsg("Please enter a new password.");return;}
-    if(newPw!==newPw2){setPwMsg("Passwords do not match.");return;}
-    if(newPw.length<6){setPwMsg("Min 6 characters.");return;}
-    updAuth({pwHash:await sha256(newPw)});
-    setNewPw("");setNewPw2("");setChangingPw(false);setPwMsg("");
-    alert("Password updated!");
+  const changePassword = async () => {
+    if (!newPw.trim())    { setPwMsg("Please enter a new password."); return; }
+    if (newPw!==newPw2)   { setPwMsg("Passwords do not match."); return; }
+    if (newPw.length<6)   { setPwMsg("Min 6 characters."); return; }
+    try { updAuth({pwHash: await sha256(newPw)}); setNewPw(""); setNewPw2(""); setChangingPw(false); setPwMsg(""); alert("Password updated!"); }
+    catch(e) { setPwMsg("Error: "+e.message); }
   };
 
-  if(!authed) return (
+  if (!authed) return (
     <div style={{maxWidth:340,margin:"40px auto",textAlign:"center"}}>
       <div style={{fontSize:44,marginBottom:10}}>🔒</div>
       <h3 style={{margin:"0 0 6px",color:"#374151"}}>Teacher Login</h3>
@@ -529,41 +599,40 @@ function TeacherArea({classes,updCls,quizzes,updQz,auth,updAuth,logs}) {
     </div>
   );
 
-  const generateQuiz=async()=>{
-    if(!tTitle.trim()||!tTopic.trim()||!tWords||!tCEFR) return;
+  const generateQuiz = async () => {
+    if (!tTitle.trim()||!tTopic.trim()||!tWords||!tCEFR) return;
     setGenerating(true); setGenMsg("⏳ Step 1/2 — Generating passage…");
     try {
       const angles=["Focus on historical background and origins.","Focus on recent developments and future outlook.","Focus on causes and effects.","Focus on contrasting perspectives or debates.","Focus on real-world examples and case studies.","Focus on scientific or technical mechanisms.","Focus on social and cultural implications.","Focus on economic impacts and policy responses."];
-      const angle=angles[Math.floor(Math.random()*angles.length)];
-      const seed=Math.random().toString(36).slice(2,8);
-      const text=await callClaude(
-        `You are an expert EFL materials writer. Write a BRAND NEW, UNIQUE English passage for listening practice.\n- Topic: ${tTopic}\n- Angle: ${angle}\n- CEFR level: ${tCEFR}\n- Maximum length: ${tWords} running words\n- Style: engaging, TOEFL lecture-style\n- Variation seed: ${seed}\n- Do NOT include a title or headings.\nReturn ONLY the passage text, nothing else.`,2000);
-      if(!text) throw new Error("Empty passage returned.");
+      const angle = angles[Math.floor(Math.random()*angles.length)];
+      const seed  = Math.random().toString(36).slice(2,8);
+      const text  = await callClaude(
+        `You are an expert EFL materials writer. Write a BRAND NEW, UNIQUE English passage for listening practice.\n- Topic: ${tTopic}\n- Angle: ${angle}\n- CEFR level: ${tCEFR}\n- Maximum length: ${tWords} running words\n- Style: engaging, TOEFL lecture-style\n- Variation seed: ${seed}\n- Do NOT include a title or headings.\nReturn ONLY the passage text, nothing else.`, 2000);
+      if (!text) throw new Error("Empty passage returned.");
       setGenMsg("⏳ Step 2/2 — Generating TOEFL questions…");
-      const raw=await callClaude(
-        `You are a TOEFL test designer. Generate 8 MC listening comprehension questions from the passage below.\nInclude a mix of: "Vocabulary","Gist","Main Idea","Factual","Inference","Purpose"\nEach question: 4 options, 1 correct answer.\nReturn ONLY valid JSON, no markdown, no code fences:\n{"questions":[{"type":"Vocabulary","question":"...","options":["A","B","C","D"],"correctIndex":0}]}\n\nPassage:\n${text}`,4000);
-      const parsed=JSON.parse(raw.replace(/```json|```/g,"").trim());
-      if(!parsed.questions?.length) throw new Error("No questions returned.");
-      const quiz={id:Date.now().toString(),title:tTitle,topic:tTopic,cefr:tCEFR,wordCount:tWords,originalText:text,questions:parsed.questions,available:false,createdAt:new Date().toISOString()};
+      const raw = await callClaude(
+        `You are a TOEFL test designer. Generate 8 MC listening comprehension questions from the passage below.\nInclude a mix of: "Vocabulary","Gist","Main Idea","Factual","Inference","Purpose"\nEach question: 4 options, 1 correct answer.\nReturn ONLY valid JSON, no markdown, no code fences:\n{"questions":[{"type":"Vocabulary","question":"...","options":["A","B","C","D"],"correctIndex":0}]}\n\nPassage:\n${text}`, 4000);
+      const parsed = JSON.parse(raw.replace(/```json|```/g,"").trim());
+      if (!parsed.questions?.length) throw new Error("No questions returned.");
+      const quiz = {id:Date.now().toString(),title:tTitle,topic:tTopic,cefr:tCEFR,wordCount:tWords,originalText:text,questions:parsed.questions,available:false,createdAt:new Date().toISOString()};
       updQz([quiz,...quizzes]);
-      setTTitle("");setTTopic("");setTWords("");setTCEFR("");
+      setTTitle(""); setTTopic(""); setTWords(""); setTCEFR("");
       setGenMsg("✅ Quiz created! See list below.");
     } catch(e) { setGenMsg("❌ "+e.message); }
     setGenerating(false);
   };
 
-  const toggleAvail=id=>updQz(quizzes.map(q=>q.id===id?{...q,available:!q.available}:q));
-  const deleteQz=id=>updQz(quizzes.filter(q=>q.id!==id));
-  const addCls=()=>{if(newCls.trim()&&!classes.includes(newCls.trim())){updCls([...classes,newCls.trim()]);setNewCls("");}};
+  const toggleAvail = id => updQz(quizzes.map(q=>q.id===id?{...q,available:!q.available}:q));
+  const deleteQz    = id => updQz(quizzes.filter(q=>q.id!==id));
+  const addCls      = () => { if(newCls.trim()&&!classes.includes(newCls.trim())){updCls([...classes,newCls.trim()]);setNewCls("");} };
 
-  // Item analysis
-  const quiz=quizzes.find(q=>q.id===selQuiz);
-  const qLogs=logs.filter(l=>l.quizId===selQuiz);
-  const stats=quiz?quiz.questions.map((q,i)=>{
-    const att=qLogs.filter(l=>l.responses?.[i]!==undefined);
-    const cor=att.filter(l=>l.responses[i]===q.correctIndex);
-    return{facility:att.length>0?cor.length/att.length:null,attempted:att.length,optCounts:[0,1,2,3].map(j=>att.filter(l=>l.responses[i]===j).length)};
-  }):[];
+  const quiz  = quizzes.find(q=>q.id===selQuiz);
+  const qLogs = logs.filter(l=>l.quizId===selQuiz);
+  const stats = quiz ? quiz.questions.map((q,i)=>{
+    const att = qLogs.filter(l=>l.responses?.[i]!==undefined);
+    const cor = att.filter(l=>l.responses[i]===q.correctIndex);
+    return {facility:att.length>0?cor.length/att.length:null,attempted:att.length,optCounts:[0,1,2,3].map(j=>att.filter(l=>l.responses[i]===j).length)};
+  }) : [];
 
   const SECS=[["quizzes","📚 Quizzes"],["classes","👥 Classes"],["texts","📄 Texts"],["analysis","📊 Analysis"]];
   return (
@@ -581,8 +650,20 @@ function TeacherArea({classes,updCls,quizzes,updQz,auth,updAuth,logs}) {
         </div>
       </div>
 
-      {apiKeyBanner}
+      {/* API Key Panel */}
+      <div style={{background:apiKeySaved?"#f0fdf4":"#fef3c7",border:`1px solid ${apiKeySaved?"#86efac":"#fde68a"}`,borderRadius:8,padding:"10px 14px",marginBottom:14}}>
+        <div style={{fontWeight:700,color:apiKeySaved?"#15803d":"#92400e",marginBottom:6,fontSize:13}}>
+          {apiKeySaved?"✅ Anthropic API Key Set":"⚠️ Anthropic API Key Required"}
+        </div>
+        {!apiKeySaved&&<div style={{fontSize:12,color:"#92400e",marginBottom:8}}>Get your key at <a href="https://console.anthropic.com" target="_blank" style={{color:"#1d4ed8"}}>console.anthropic.com</a> → API Keys → Create Key</div>}
+        <div style={{display:"flex",gap:8}}>
+          <input value={apiKeyInput} onChange={e=>setApiKeyInput(e.target.value)} placeholder="sk-ant-..." type="password"
+            style={{flex:1,padding:"7px 10px",borderRadius:6,border:"1px solid #d1d5db",fontSize:13}}/>
+          <button onClick={handleSaveApiKey} style={B("#16a34a",{padding:"7px 14px",fontSize:13})}>💾 Save</button>
+        </div>
+      </div>
 
+      {/* Change Password */}
       {changingPw&&(
         <div style={{...CARD,background:"#fefce8",border:"1px solid #fde68a",marginBottom:14}}>
           <div style={{fontWeight:"600",marginBottom:8}}>🔑 Change Password</div>
@@ -603,16 +684,6 @@ function TeacherArea({classes,updCls,quizzes,updQz,auth,updAuth,logs}) {
         <div>
           <div style={{...CARD,background:"#f8fafc"}}>
             <div style={{fontWeight:"600",marginBottom:12}}>➕ Generate New Quiz</div>
-            {!getApiKey()&&<div style={{fontSize:13,color:"#dc2626",marginBottom:10}}>⚠️ Set your Anthropic API key above before generating.</div>}
-            {getApiKey()&&<div style={{fontSize:12,color:"#16a34a",marginBottom:10,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-              ✅ API key set
-              <button onClick={()=>{setApiKey("");setApiKeyState("");}} style={{fontSize:11,padding:"2px 8px",background:"#fee2e2",color:"#dc2626",border:"none",borderRadius:4,cursor:"pointer"}}>Clear key</button>
-            </div>}
-            {getApiKey()&&<div style={{display:"flex",gap:8,marginBottom:10}}>
-              <input value={apiKey} onChange={e=>setApiKeyState(e.target.value)} placeholder="Update API key…" type="password"
-                style={{flex:1,padding:"7px 10px",borderRadius:6,border:"1px solid #d1d5db",fontSize:13}}/>
-              <button onClick={saveApiKey} style={B("#16a34a",{padding:"7px 12px",fontSize:12})}>Update</button>
-            </div>}
             <input value={tTitle} onChange={e=>setTTitle(e.target.value)} placeholder="Quiz title (e.g. Lecture 1 – Climate Change)"
               style={{display:"block",width:"100%",padding:"8px 12px",borderRadius:6,border:"1px solid #d1d5db",fontSize:14,marginBottom:8,boxSizing:"border-box"}}/>
             <input value={tTopic} onChange={e=>setTTopic(e.target.value)} placeholder="Topic (e.g. The impact of social media on mental health)"
@@ -678,9 +749,10 @@ function TeacherArea({classes,updCls,quizzes,updQz,auth,updAuth,logs}) {
             :classes.map(c=>{
               const cLogs=logs.filter(l=>l.classId===c);
               const avg=cLogs.length>0?(cLogs.reduce((a,l)=>a+(l.correctCount/l.totalCount*100),0)/cLogs.length).toFixed(1):null;
-              return(
+              return (
                 <div key={c} style={{...CARD,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-                  <div><div style={{fontWeight:600}}>👥 {c}</div>
+                  <div>
+                    <div style={{fontWeight:600}}>👥 {c}</div>
                     <div style={{fontSize:12,color:"#6b7280"}}>{cLogs.length} submission{cLogs.length!==1?"s":""}{avg!==null?` · Avg: ${avg}%`:""}</div>
                   </div>
                   <button onClick={()=>updCls(classes.filter(x=>x!==c))} style={{padding:"5px 10px",background:"#fee2e2",color:"#dc2626",border:"none",borderRadius:6,cursor:"pointer",fontSize:12}}>🗑 Remove</button>
@@ -724,7 +796,7 @@ function TeacherArea({classes,updCls,quizzes,updQz,auth,updAuth,logs}) {
                   const q=quiz.questions[i];
                   const p=s.facility!==null?(s.facility*100).toFixed(0)+"%":"—";
                   const pColor=s.facility===null?"#64748b":s.facility>=0.7?"#16a34a":s.facility>=0.4?"#d97706":"#dc2626";
-                  return(
+                  return (
                     <tr key={i} style={{borderTop:"1px solid #f1f5f9",background:i%2===0?"white":"#f8fafc"}}>
                       <td style={{padding:"7px 10px",fontWeight:700,color:"#1e3a8a"}}>Q{i+1}</td>
                       <td style={{padding:"7px 10px"}}><Tag label={q.type}/></td>
@@ -739,7 +811,7 @@ function TeacherArea({classes,updCls,quizzes,updQz,auth,updAuth,logs}) {
                   );
                 })}</tbody>
               </table>
-              <div style={{fontSize:11,color:"#94a3b8",marginTop:8}}>Facility: 🟢 ≥70% · 🟡 40–69% · 🔴 &lt;40% · Green column = correct answer</div>
+              <div style={{fontSize:11,color:"#94a3b8",marginTop:8}}>Facility: 🟢 ≥70% · 🟡 40–69% · 🔴 &lt;40% · Green = correct answer</div>
             </div>
             <div style={{...CARD,overflowX:"auto"}}>
               <div style={{fontWeight:700,color:"#1e40af",marginBottom:10}}>Student Response Detail</div>
@@ -774,45 +846,12 @@ function TeacherArea({classes,updCls,quizzes,updQz,auth,updAuth,logs}) {
   );
 }
 
-// ── TextCard ──────────────────────────────────────────────────────
-function TextCard({q,idx}) {
-  const [expanded,setExpanded]=useState(false); const [playing,setPlaying]=useState(false);
-  const wc=q.originalText.trim().split(/\s+/).length;
-  const play=()=>{ speechSynthesis.cancel(); const u=new SpeechSynthesisUtterance(q.originalText);
-    u.lang="en-US"; u.rate=0.85; u.onstart=()=>setPlaying(true); u.onend=()=>setPlaying(false); speechSynthesis.speak(u); };
-  const stop=()=>{ speechSynthesis.cancel(); setPlaying(false); };
-  return (
-    <div style={{...CARD,padding:0,overflow:"hidden"}}>
-      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"12px 14px",background:"#f8fafc",borderBottom:expanded?"1px solid #e2e8f0":"none",flexWrap:"wrap",gap:8}}>
-        <div style={{flex:1}}>
-          <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:3}}>
-            <span style={{background:"#1d4ed8",color:"white",borderRadius:5,fontWeight:800,fontSize:11,padding:"1px 7px"}}>#{idx+1}</span>
-            <span style={{fontWeight:700,color:"#1e3a8a"}}>{q.title}</span>
-            <span style={{fontSize:11,padding:"1px 7px",borderRadius:99,background:q.available?"#dcfce7":"#fee2e2",color:q.available?"#15803d":"#dc2626",fontWeight:700}}>{q.available?"●Live":"●Hidden"}</span>
-          </div>
-          <div style={{fontSize:12,color:"#6b7280"}}>CEFR {q.cefr} · {wc} words · {q.topic}</div>
-        </div>
-        <div style={{display:"flex",gap:6}}>
-          {!playing?<button onClick={play} style={B("#1d4ed8",{padding:"5px 12px",fontSize:13})}>▶ Play</button>
-                   :<button onClick={stop} style={B("#dc2626",{padding:"5px 12px",fontSize:13})}>■ Stop</button>}
-          <button onClick={()=>setExpanded(e=>!e)} style={{padding:"5px 10px",background:"#eff6ff",color:"#1d4ed8",border:"1px solid #bfdbfe",borderRadius:6,cursor:"pointer",fontSize:12,fontWeight:700}}>
-            {expanded?"▲ Hide":"▼ Show"}
-          </button>
-        </div>
-      </div>
-      {expanded&&<div style={{padding:"14px 16px"}}>
-        <div style={{fontSize:11,fontWeight:700,color:"#94a3b8",letterSpacing:.8,marginBottom:8}}>PASSAGE TEXT</div>
-        <div style={{fontSize:14,color:"#1e293b",lineHeight:2,whiteSpace:"pre-wrap"}}>{q.originalText}</div>
-      </div>}
-    </div>
-  );
-}
-
 // ═══════════════════════════════════════════════════════════════════
 // LEARNING LOGS
 // ═══════════════════════════════════════════════════════════════════
 function LogsArea({logs}) {
-  const [col,setCol]=useState("timestamp"); const [asc,setAsc]=useState(false);
+  const [col,setCol] = useState("timestamp");
+  const [asc,setAsc] = useState(false);
   const COLS=[{k:"classId",l:"Class"},{k:"studentId",l:"Student ID"},{k:"quizTitle",l:"Quiz"},{k:"score",l:"Score"},{k:"timestamp",l:"Time"}];
   const sorted=[...logs].sort((a,b)=>{ const av=a[col]||"",bv=b[col]||""; return asc?av.localeCompare(bv):bv.localeCompare(av); });
   const toggleSort=k=>{ if(col===k)setAsc(a=>!a); else{setCol(k);setAsc(true);} };
