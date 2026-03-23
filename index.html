@@ -1,0 +1,807 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Listening Comprehension Quiz</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.3/babel.min.js"></script>
+<style>*{box-sizing:border-box;margin:0;padding:0;}body{font-family:"Segoe UI",system-ui,sans-serif;background:#f1f5f9;}</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useEffect, useRef, useCallback } = React;
+
+// ── CONFIG ────────────────────────────────────────────────────────
+const DEFAULT_DB = "";
+const MODEL = "claude-sonnet-4-6";
+
+// ── SHA-256 ───────────────────────────────────────────────────────
+async function sha256(str) {
+  const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(str));
+  return Array.from(new Uint8Array(buf)).map(b=>b.toString(16).padStart(2,"0")).join("");
+}
+
+// ── Firebase REST ─────────────────────────────────────────────────
+function getDbUrl() {
+  try { return new URLSearchParams(window.location.hash.slice(1)).get("db") || DEFAULT_DB || null; }
+  catch { return DEFAULT_DB || null; }
+}
+function setDbUrlHash(url) { window.location.hash = "db=" + encodeURIComponent(url); }
+async function fbGet(url, path) {
+  const r = await fetch(`${url}/${path}.json`);
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return await r.json();
+}
+async function fbPut(url, path, data) {
+  const r = await fetch(`${url}/${path}.json`, {
+    method:"PUT", headers:{"Content-Type":"application/json"}, body:JSON.stringify(data)
+  });
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+}
+async function fbLoad(url) {
+  const d = await fbGet(url, "lmc");
+  return d || { classes:[], quizzes:[], logs:[], auth:{} };
+}
+async function fbSave(url, data) { await fbPut(url, "lmc", data); }
+
+// ── Claude API ────────────────────────────────────────────────────
+async function callClaude(prompt, maxTokens=2000) {
+  const r = await fetch("https://api.anthropic.com/v1/messages", {
+    method:"POST", headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({ model:MODEL, max_tokens:maxTokens, messages:[{role:"user",content:prompt}] })
+  });
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  const d = await r.json();
+  if (d.error) throw new Error(d.error.message);
+  return (d.content||[]).map(i=>i.text||"").join("").trim();
+}
+
+// ── UI helpers ────────────────────────────────────────────────────
+const B = (bg="#4f46e5", extra={}) => ({padding:"8px 16px",background:bg,color:"#fff",border:"none",borderRadius:6,cursor:"pointer",fontSize:14,...extra});
+const CARD = {border:"1px solid #e2e8f0",borderRadius:8,padding:"12px 14px",marginBottom:10};
+const TAG_COLORS = {
+  Vocabulary:{bg:"#ede9fe",color:"#6d28d9",border:"#c4b5fd"},
+  Gist:{bg:"#fef3c7",color:"#92400e",border:"#fde68a"},
+  Factual:{bg:"#dcfce7",color:"#166534",border:"#86efac"},
+  Inference:{bg:"#fee2e2",color:"#991b1b",border:"#fca5a5"},
+  "Main Idea":{bg:"#e0f2fe",color:"#075985",border:"#7dd3fc"},
+  Purpose:{bg:"#fce7f3",color:"#9d174d",border:"#f9a8d4"},
+};
+const Tag = ({label}) => {
+  const s = TAG_COLORS[label]||{bg:"#f1f5f9",color:"#475569",border:"#cbd5e1"};
+  return <span style={{fontSize:11,fontWeight:700,padding:"2px 8px",borderRadius:99,background:s.bg,color:s.color,border:`1px solid ${s.border}`}}>{label}</span>;
+};
+
+// ═══════════════════════════════════════════════════════════════════
+// SETUP SCREEN
+// ═══════════════════════════════════════════════════════════════════
+function SetupScreen({onReady}) {
+  const [dbInput,setDbInput]=useState(""); const [loading,setLoading]=useState(false);
+  const [err,setErr]=useState(""); const [diagLog,setDiagLog]=useState([]);
+  const log = msg => setDiagLog(p=>[...p,msg]);
+
+  async function connect() {
+    let url = dbInput.trim().replace(/\s+/g,"").replace(/\/+$/,"").split("?")[0].split("#")[0];
+    setErr(""); setDiagLog([]);
+    if (!url) { setErr("Please enter your Firebase Realtime Database URL."); return; }
+    if (!url.startsWith("https://")) { setErr("URL must start with https://"); return; }
+    setLoading(true);
+    log(`🔍 Fetching: ${url}/lmc.json`);
+    let r;
+    try { r = await fetch(`${url}/lmc.json`); log(`✅ HTTP ${r.status} ${r.statusText}`); }
+    catch(e) {
+      log(`❌ Network error: ${e.message}`);
+      log(`ℹ️  Fix: Firebase Console → Realtime Database → Rules → set read & write to true → Publish`);
+      setErr("Failed to reach Firebase. See diagnostics below."); setLoading(false); return;
+    }
+    if (r.status===401||r.status===403) {
+      log(`❌ Permission denied — update Firebase Rules.`);
+      setErr(`Permission denied (HTTP ${r.status}).`); setLoading(false); return;
+    }
+    if (!r.ok) { log(`❌ HTTP ${r.status}`); setErr(`HTTP ${r.status} error.`); setLoading(false); return; }
+    let existing;
+    try { existing=await r.json(); log(`✅ Response parsed OK`); }
+    catch(e) { log(`❌ Invalid JSON: ${e.message}`); setErr("Invalid response."); setLoading(false); return; }
+    if (!existing) {
+      log(`ℹ️  Empty — initialising…`);
+      try { await fbSave(url,{classes:[],quizzes:[],logs:[],auth:{}}); log(`✅ Initialised`); }
+      catch(e) { log(`❌ Write failed: ${e.message}`); setErr("Read OK but write failed."); setLoading(false); return; }
+    } else { log(`✅ Existing data found`); }
+    log(`🚀 Launching…`);
+    setDbUrlHash(url); onReady(url); setLoading(false);
+  }
+
+  const inp={display:"block",width:"100%",padding:"10px 12px",borderRadius:8,border:"1px solid #d1d5db",fontSize:14,marginBottom:8};
+  return (
+    <div style={{minHeight:"100vh",background:"linear-gradient(135deg,#eef2ff,#f1f5f9)",display:"flex",alignItems:"center",justifyContent:"center",padding:16}}>
+      <div style={{background:"#fff",borderRadius:16,boxShadow:"0 8px 32px rgba(0,0,0,.1)",padding:36,maxWidth:500,width:"100%"}}>
+        <div style={{textAlign:"center",marginBottom:24}}>
+          <div style={{fontSize:52,marginBottom:8}}>🎧</div>
+          <h1 style={{color:"#1e1b4b",fontSize:22,marginBottom:4}}>Listening Comprehension Quiz</h1>
+          <p style={{color:"#6b7280",fontSize:13}}>TOEFL-style AI-powered Practice · Firebase Storage</p>
+        </div>
+        <div style={{background:"#eff6ff",border:"1px solid #bfdbfe",borderRadius:12,padding:16,marginBottom:20,fontSize:13,color:"#1e40af"}}>
+          <p style={{fontWeight:"700",marginBottom:10}}>📋 Firebase setup (~3 min, free):</p>
+          {[
+            <span>Go to <a href="https://console.firebase.google.com" target="_blank" style={{color:"#1d4ed8",fontWeight:600}}>console.firebase.google.com</a> → Create a project</span>,
+            <span>Left sidebar → <strong>Build → Realtime Database → Create Database</strong></span>,
+            <span>Choose any region → <strong>Start in Test mode</strong></span>,
+            <span>Copy the DB URL: <code style={{background:"#dbeafe",padding:"1px 5px",borderRadius:3}}>https://xxx-default-rtdb.firebaseio.com</code></span>,
+            <span>Paste below and click Connect</span>
+          ].map((s,i)=>(
+            <div key={i} style={{display:"flex",gap:10,marginBottom:6}}>
+              <span style={{fontWeight:"700",color:"#3b82f6",minWidth:18}}>{i+1}.</span><span>{s}</span>
+            </div>
+          ))}
+          <p style={{marginTop:8,fontWeight:600}}>⚠️ If test mode expires: Rules tab → ".read":true, ".write":true → Publish</p>
+        </div>
+        <input value={dbInput} onChange={e=>{setDbInput(e.target.value);setErr("");}}
+          onKeyDown={e=>e.key==="Enter"&&connect()}
+          placeholder="https://your-project-default-rtdb.firebaseio.com"
+          style={inp}/>
+        {err&&<div style={{color:"#dc2626",fontSize:13,marginBottom:8,padding:"8px 10px",background:"#fef2f2",borderRadius:6,border:"1px solid #fca5a5"}}>{err}</div>}
+        <button onClick={connect} disabled={loading}
+          style={{...B(loading?"#9ca3af":"#4f46e5"),width:"100%",padding:11,fontSize:15,cursor:loading?"not-allowed":"pointer"}}>
+          {loading?"⏳ Connecting…":"🔗 Connect & Launch"}
+        </button>
+        {diagLog.length>0&&(
+          <div style={{marginTop:12,background:"#0f172a",borderRadius:8,padding:"10px 14px",fontFamily:"monospace",fontSize:12,lineHeight:1.8}}>
+            {diagLog.map((l,i)=>(
+              <div key={i} style={{color:l.startsWith("❌")?"#f87171":l.startsWith("✅")||l.startsWith("🚀")?"#86efac":"#94a3b8"}}>{l}</div>
+            ))}
+          </div>
+        )}
+        <p style={{fontSize:12,color:"#9ca3af",textAlign:"center",marginTop:10}}>
+          Bookmark the URL after connecting to return without re-entering it.
+        </p>
+      </div>
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// AUDIO PLAYER
+// ═══════════════════════════════════════════════════════════════════
+function AudioPlayer({text}) {
+  const [playing,setPlaying]=useState(false); const [times,setTimes]=useState(0);
+  const [rate,setRate]=useState(0.85);
+  const play=()=>{ speechSynthesis.cancel(); const u=new SpeechSynthesisUtterance(text);
+    u.lang="en-US"; u.rate=rate; u.onstart=()=>setPlaying(true);
+    u.onend=()=>{setPlaying(false);setTimes(t=>t+1);}; speechSynthesis.speak(u); };
+  const stop=()=>{ speechSynthesis.cancel(); setPlaying(false); };
+  return (
+    <div style={{background:"linear-gradient(135deg,#1e40af,#2563eb)",color:"white",borderRadius:10,padding:"14px 18px",marginBottom:18,display:"flex",alignItems:"center",gap:12,flexWrap:"wrap"}}>
+      <span style={{fontSize:22}}>🎧</span>
+      <div style={{flex:1}}>
+        <div style={{fontWeight:700,fontSize:14}}>Listen to the passage</div>
+        <div style={{fontSize:12,opacity:.8,marginTop:2}}>{times>0?`Played ${times}×`:"Not yet played"} · You may listen as many times as you wish</div>
+      </div>
+      <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
+        <input type="range" min={0.5} max={1.5} step={0.1} value={rate} onChange={e=>setRate(+e.target.value)} style={{width:80}}/>
+        <span style={{fontSize:12,minWidth:28}}>{rate}×</span>
+        {!playing
+          ?<button onClick={play} style={{background:"white",color:"#1d4ed8",border:"none",borderRadius:7,padding:"7px 16px",cursor:"pointer",fontWeight:800,fontSize:13}}>▶ Play</button>
+          :<button onClick={stop} style={{background:"#dc2626",color:"white",border:"none",borderRadius:7,padding:"7px 14px",cursor:"pointer",fontWeight:800,fontSize:13}}>■ Stop</button>}
+        {times>0&&!playing&&<button onClick={play} style={{background:"rgba(255,255,255,.2)",color:"white",border:"1px solid rgba(255,255,255,.4)",borderRadius:7,padding:"7px 12px",cursor:"pointer",fontSize:12}}>↺</button>}
+      </div>
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// FEEDBACK PANEL
+// ═══════════════════════════════════════════════════════════════════
+function FeedbackPanel({quiz, userAnswers}) {
+  const [data,setData]=useState(null); const [loading,setLoading]=useState(true);
+  const [showText,setShowText]=useState(false); const [textTr,setTextTr]=useState(""); const [loadingTr,setLoadingTr]=useState(false);
+
+  useEffect(()=>{
+    const qLines=quiz.questions.map((q,i)=>
+      `Q${i+1} [${q.type}]: ${q.question}\nOptions: ${q.options.map((o,j)=>`${String.fromCharCode(65+j)}) ${o}`).join(" | ")}\nCorrect: ${String.fromCharCode(65+q.correctIndex)}\nUser chose: ${String.fromCharCode(65+userAnswers[i])}`
+    ).join("\n\n");
+    const prompt=`You are a TOEFL listening expert. For each question below provide: whether user was correct, a 2–3 sentence English explanation, and a Traditional Chinese (繁體中文) translation of that explanation.\nReturn ONLY valid JSON, no markdown:\n{"items":[{"correct":true,"explanation":"...","explanationZH":"..."}]}\n\n${qLines}`;
+    callClaude(prompt,3000)
+      .then(raw=>{setData(JSON.parse(raw.replace(/```json|```/g,"").trim()));})
+      .catch(()=>setData({error:true}))
+      .finally(()=>setLoading(false));
+  },[]);
+
+  const handleShowText=async()=>{
+    setShowText(true); if(textTr) return; setLoadingTr(true);
+    try { const t=await callClaude(`Translate to Traditional Chinese (繁體中文). Return only the translation.\n\n${quiz.originalText}`,1000); setTextTr(t); }
+    catch { setTextTr("（翻譯失敗）"); }
+    setLoadingTr(false);
+  };
+
+  const total=quiz.questions.length;
+  const correct=data&&!data.error?data.items.filter(i=>i.correct).length:0;
+  return (
+    <div style={{marginTop:8}}>
+      <div style={{background:"linear-gradient(135deg,#1e40af,#2563eb)",color:"white",borderRadius:10,padding:"16px 20px",marginBottom:18}}>
+        <div style={{fontSize:26,fontWeight:800}}>{loading?"Scoring…":`🎉 ${correct} / ${total}`}</div>
+        <div style={{fontSize:13,opacity:.85}}>{loading?"Generating feedback with AI…":`${Math.round(correct/total*100)}% accuracy`}</div>
+      </div>
+      {loading&&<div style={{textAlign:"center",padding:32,color:"#64748b"}}><div style={{fontSize:28,marginBottom:8}}>⏳</div>Generating explanations &amp; translations…</div>}
+      {data&&!data.error&&quiz.questions.map((q,i)=>{
+        const fb=data.items[i]; const ua=userAnswers[i];
+        return (
+          <div key={i} style={{...CARD,border:`1.5px solid ${fb.correct?"#86efac":"#fca5a5"}`}}>
+            <div style={{display:"flex",gap:8,alignItems:"center",marginBottom:8,flexWrap:"wrap"}}>
+              <strong style={{color:"#1e3a8a"}}>Q{i+1}</strong><Tag label={q.type}/>
+              <span style={{fontSize:12,fontWeight:700,padding:"2px 8px",borderRadius:99,background:fb.correct?"#dcfce7":"#fee2e2",color:fb.correct?"#15803d":"#dc2626"}}>{fb.correct?"✅ Correct":"❌ Incorrect"}</span>
+            </div>
+            <div style={{fontWeight:600,color:"#1e293b",fontSize:14,marginBottom:10,lineHeight:1.6}}>{q.question}</div>
+            <div style={{display:"flex",flexDirection:"column",gap:5,marginBottom:10}}>
+              {q.options.map((opt,j)=>{
+                const isC=j===q.correctIndex,isU=j===ua;
+                let bg="#f8fafc",border="#e2e8f0",color="#374151";
+                if(isC){bg="#dcfce7";border="#22c55e";color="#15803d";}
+                else if(isU){bg="#fee2e2";border="#ef4444";color="#dc2626";}
+                return <div key={j} style={{background:bg,border:`1.5px solid ${border}`,borderRadius:7,padding:"8px 12px",fontSize:13,color,fontWeight:(isC||isU)?700:400,display:"flex",gap:8,alignItems:"center"}}>
+                  <span style={{minWidth:22,fontWeight:800}}>{String.fromCharCode(65+j)})</span>
+                  <span style={{flex:1}}>{opt}</span>
+                  {isC&&<span>✓</span>}{isU&&!isC&&<span>✗ your answer</span>}
+                </div>;
+              })}
+            </div>
+            <div style={{background:"#f0f9ff",border:"1px solid #bae6fd",borderRadius:7,padding:"9px 13px",marginBottom:7}}>
+              <div style={{fontSize:11,fontWeight:700,color:"#0369a1",marginBottom:3}}>EXPLANATION</div>
+              <div style={{fontSize:13,color:"#0c4a6e",lineHeight:1.7}}>{fb.explanation}</div>
+            </div>
+            <div style={{background:"#fefce8",border:"1px solid #fde68a",borderRadius:7,padding:"9px 13px"}}>
+              <div style={{fontSize:11,fontWeight:700,color:"#92400e",marginBottom:3}}>中文說明</div>
+              <div style={{fontSize:14,color:"#78350f",lineHeight:1.8,fontFamily:"'Microsoft JhengHei',sans-serif"}}>{fb.explanationZH}</div>
+            </div>
+          </div>
+        );
+      })}
+      {data?.error&&<div style={{color:"#dc2626",padding:14,background:"#fee2e2",borderRadius:8}}>❌ Could not load feedback.</div>}
+      {data&&!data.error&&(
+        <div style={{marginTop:8}}>
+          <button onClick={handleShowText} style={{background:"#f1f5f9",border:"1px solid #e2e8f0",borderRadius:7,padding:"9px 16px",cursor:"pointer",fontWeight:700,fontSize:13,color:"#1e3a8a",width:"100%",marginBottom:showText?10:0}}>
+            {showText?"▲ Hide Original Text & Translation":"▼ Show Original Text & Chinese Translation"}
+          </button>
+          {showText&&<>
+            <div style={{...CARD,background:"white"}}><div style={{fontSize:11,fontWeight:700,color:"#64748b",marginBottom:8}}>ORIGINAL PASSAGE</div><div style={{fontSize:14,color:"#1e293b",lineHeight:1.9}}>{quiz.originalText}</div></div>
+            <div style={{...CARD,background:"#fefce8",border:"1px solid #fde68a"}}><div style={{fontSize:11,fontWeight:700,color:"#92400e",marginBottom:8}}>中文翻譯</div>
+              {loadingTr?<div style={{color:"#94a3b8"}}>翻譯中…</div>:<div style={{fontSize:14,color:"#78350f",lineHeight:2,fontFamily:"'Microsoft JhengHei',sans-serif"}}>{textTr}</div>}
+            </div>
+          </>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// ROOT APP
+// ═══════════════════════════════════════════════════════════════════
+function App() {
+  const [dbUrl,setDbUrlState]=useState(getDbUrl);
+  const [db,setDb]=useState(null); const [tab,setTab]=useState("student");
+  const [saving,setSaving]=useState(false); const [saveErr,setSaveErr]=useState("");
+  const timer=useRef(null);
+
+  useEffect(()=>{
+    if(!dbUrl) return;
+    fbLoad(dbUrl).then(setDb).catch(e=>setSaveErr("Load error: "+e.message));
+  },[dbUrl]);
+
+  const persist=useCallback((newDb)=>{
+    if(!dbUrl) return;
+    if(timer.current) clearTimeout(timer.current);
+    timer.current=setTimeout(async()=>{
+      setSaving(true); setSaveErr("");
+      try { await fbSave(dbUrl,newDb); }
+      catch(e) { setSaveErr("⚠️ Save failed: "+e.message); }
+      setSaving(false);
+    },600);
+  },[dbUrl]);
+
+  const updateDb=useCallback((fn)=>{
+    setDb(prev=>{ const next=fn(prev); persist(next); return next; });
+  },[persist]);
+
+  if(!dbUrl) return <SetupScreen onReady={url=>{setDbUrlHash(url);setDbUrlState(url);}}/>;
+  if(!db) return (
+    <div style={{minHeight:"100vh",display:"flex",alignItems:"center",justifyContent:"center",background:"#f8fafc"}}>
+      <div style={{textAlign:"center"}}><div style={{fontSize:48,marginBottom:12}}>⏳</div>
+        <p style={{color:"#6b7280"}}>Loading…</p>
+        {saveErr&&<p style={{color:"#dc2626",fontSize:13,marginTop:8}}>{saveErr}</p>}
+      </div>
+    </div>
+  );
+
+  const {classes=[],quizzes=[],logs=[],auth={}}=db;
+  const updCls=c=>updateDb(d=>({...d,classes:c}));
+  const updQz=q=>updateDb(d=>({...d,quizzes:q}));
+  const addLog=entry=>updateDb(d=>({...d,logs:[entry,...(d.logs||[])]}));
+  const updAuth=a=>updateDb(d=>({...d,auth:a}));
+
+  const TABS=[["student","🎓 Student"],["teacher","👩‍🏫 Teacher"],["logs","📊 Logs"]];
+  return (
+    <div style={{maxWidth:820,margin:"0 auto",padding:"16px 14px 48px"}}>
+      <div style={{background:"linear-gradient(135deg,#1e40af,#3b82f6)",color:"white",borderRadius:10,padding:"16px 20px",marginBottom:18,textAlign:"center"}}>
+        <h1 style={{margin:0,fontSize:20,fontWeight:800}}>🎧 Listening Comprehension Quiz</h1>
+        <div style={{fontSize:13,opacity:.85,marginTop:2}}>TOEFL-style AI-powered English Listening Practice</div>
+        {saving&&<div style={{fontSize:11,color:"#bfdbfe",marginTop:4}}>💾 Saving…</div>}
+        {saveErr&&<div style={{fontSize:11,color:"#fca5a5",marginTop:4}}>{saveErr}</div>}
+      </div>
+      <div style={{display:"flex",background:"#f1f5f9",borderRadius:8,padding:4,marginBottom:20}}>
+        {TABS.map(([k,l])=>(
+          <button key={k} onClick={()=>setTab(k)} style={{flex:1,padding:"9px 0",border:"none",borderRadius:6,cursor:"pointer",
+            background:tab===k?"#1d4ed8":"transparent",color:tab===k?"#fff":"#374151",
+            fontWeight:tab===k?"700":"400",fontSize:14,transition:"all .15s"}}>{l}</button>
+        ))}
+      </div>
+      {tab==="student"&&<StudentArea classes={classes} quizzes={quizzes} addLog={addLog}/>}
+      {tab==="teacher"&&<TeacherArea classes={classes} updCls={updCls} quizzes={quizzes} updQz={updQz} auth={auth} updAuth={updAuth} logs={logs}/>}
+      {tab==="logs"&&<LogsArea logs={logs}/>}
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// STUDENT AREA
+// ═══════════════════════════════════════════════════════════════════
+function StudentArea({classes,quizzes,addLog}) {
+  const [cls,setCls]=useState(""); const [sid,setSid]=useState(""); const [activeQuiz,setActiveQuiz]=useState(null);
+  const [userAnswers,setUserAnswers]=useState({}); const [submitted,setSubmitted]=useState(false);
+  const available=quizzes.filter(q=>q.available);
+
+  const startQuiz=q=>{setActiveQuiz(q);setUserAnswers({});setSubmitted(false);};
+  const resetQuiz=()=>{setActiveQuiz(null);speechSynthesis.cancel();};
+  const allAnswered=activeQuiz&&Object.keys(userAnswers).length===activeQuiz.questions.length;
+
+  const handleSubmit=()=>{
+    setSubmitted(true);
+    const correctCount=activeQuiz.questions.filter((q,i)=>userAnswers[i]===q.correctIndex).length;
+    if(sid.trim()) addLog({
+      classId:cls||"—", studentId:sid.trim(), quizTitle:activeQuiz.title,
+      quizId:activeQuiz.id, score:`${correctCount}/${activeQuiz.questions.length}`,
+      correctCount, totalCount:activeQuiz.questions.length,
+      responses:activeQuiz.questions.map((_,i)=>userAnswers[i]??-1),
+      timestamp:new Date().toLocaleString("zh-TW",{hour12:false})
+    });
+  };
+
+  if(activeQuiz) return (
+    <div>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
+        <div><div style={{fontWeight:700,color:"#1e3a8a",fontSize:16}}>{activeQuiz.title}</div>
+          <div style={{fontSize:12,color:"#94a3b8"}}>{activeQuiz.questions.length} questions · CEFR {activeQuiz.cefr}</div></div>
+        {!submitted&&<button onClick={resetQuiz} style={{background:"#e2e8f0",border:"none",borderRadius:6,padding:"6px 12px",cursor:"pointer",fontSize:13}}>← Back</button>}
+      </div>
+      <AudioPlayer text={activeQuiz.originalText}/>
+      {!submitted&&<div style={{background:"#fefce8",border:"1px solid #fde68a",borderRadius:8,padding:"9px 14px",marginBottom:16,fontSize:13,color:"#92400e"}}>
+        💡 Listen to the passage, answer all questions, then click <strong>Submit Answers</strong>.
+      </div>}
+      {!submitted&&activeQuiz.questions.map((q,i)=>(
+        <div key={i} style={{...CARD,border:`1.5px solid ${userAnswers[i]!==undefined?"#86efac":"#e2e8f0"}`}}>
+          <div style={{display:"flex",gap:8,alignItems:"center",marginBottom:8,flexWrap:"wrap"}}>
+            <strong style={{color:"#1e3a8a"}}>Q{i+1}</strong><Tag label={q.type}/>
+            {userAnswers[i]!==undefined&&<span style={{fontSize:12,color:"#16a34a",fontWeight:700}}>✓ Answered</span>}
+          </div>
+          <div style={{fontWeight:600,fontSize:14,marginBottom:10,lineHeight:1.6,color:"#1e293b"}}>{q.question}</div>
+          <div style={{display:"flex",flexDirection:"column",gap:6}}>
+            {q.options.map((opt,j)=>(
+              <div key={j} onClick={()=>setUserAnswers(p=>({...p,[i]:j}))}
+                style={{background:userAnswers[i]===j?"#dbeafe":"#f8fafc",border:`1.5px solid ${userAnswers[i]===j?"#3b82f6":"#e2e8f0"}`,borderRadius:7,padding:"9px 12px",fontSize:13,cursor:"pointer",display:"flex",gap:8,fontWeight:userAnswers[i]===j?700:400,color:userAnswers[i]===j?"#1e3a8a":"#374151"}}>
+                <span style={{minWidth:22,fontWeight:800}}>{String.fromCharCode(65+j)})</span><span>{opt}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      ))}
+      {!submitted&&<button onClick={handleSubmit} disabled={!allAnswered}
+        style={{...B(allAnswered?"#16a34a":"#9ca3af"),width:"100%",padding:11,fontSize:15,cursor:allAnswered?"pointer":"not-allowed",marginBottom:12}}>
+        {allAnswered?"Submit All Answers →":`Answer all ${activeQuiz.questions.length} questions (${Object.keys(userAnswers).length}/${activeQuiz.questions.length})`}
+      </button>}
+      {submitted&&<FeedbackPanel quiz={activeQuiz} userAnswers={userAnswers}/>}
+      {submitted&&<div style={{textAlign:"center",marginTop:14}}><button onClick={resetQuiz} style={B()}>← Back to Quiz List</button></div>}
+    </div>
+  );
+
+  return (
+    <div>
+      <div style={{...CARD,background:"#f8fafc"}}>
+        <div style={{fontWeight:"600",marginBottom:10,color:"#374151"}}>Student Identity</div>
+        <div style={{display:"flex",gap:12,flexWrap:"wrap"}}>
+          <div style={{flex:1,minWidth:140}}>
+            <label style={{fontSize:12,color:"#6b7280"}}>Class（optional）</label>
+            <select value={cls} onChange={e=>setCls(e.target.value)} style={{display:"block",width:"100%",marginTop:4,padding:"7px 10px",borderRadius:6,border:"1px solid #d1d5db",fontSize:14}}>
+              <option value="">— Select class —</option>
+              {classes.map(c=><option key={c}>{c}</option>)}
+            </select>
+          </div>
+          <div style={{flex:1,minWidth:140}}>
+            <label style={{fontSize:12,color:"#6b7280"}}>Student ID（optional）</label>
+            <input value={sid} onChange={e=>setSid(e.target.value)} placeholder="e.g. B11234567"
+              style={{display:"block",width:"100%",marginTop:4,padding:"7px 10px",borderRadius:6,border:"1px solid #d1d5db",fontSize:14}}/>
+          </div>
+        </div>
+        {!sid.trim()&&<div style={{fontSize:12,color:"#f59e0b",marginTop:8}}>⚠️ Score will not be saved without a Student ID.</div>}
+      </div>
+      <div style={{fontWeight:"600",color:"#374151",marginBottom:10}}>Available Quizzes</div>
+      {available.length===0
+        ?<div style={{textAlign:"center",padding:30,color:"#9ca3af",border:"2px dashed #e5e7eb",borderRadius:8}}>
+            No quizzes available yet.
+            {quizzes.length>0&&<div style={{fontSize:13,marginTop:8,color:"#f59e0b"}}>⚠️ {quizzes.length} quiz{quizzes.length>1?"zes are":" is"} created but not published.</div>}
+          </div>
+        :available.map((q,idx)=>(
+          <div key={q.id} style={{...CARD,display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:10}}>
+            <div>
+              <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:5}}>
+                <span style={{background:"#1d4ed8",color:"white",borderRadius:5,fontWeight:800,fontSize:12,padding:"1px 8px"}}>Q{idx+1}</span>
+                <span style={{fontWeight:700,color:"#1e3a8a"}}>{q.title}</span>
+              </div>
+              <div style={{fontSize:12,color:"#6b7280",marginBottom:5}}>❓ {q.questions.length} questions · 📊 CEFR {q.cefr} · ~{q.wordCount} words</div>
+              <div style={{display:"flex",gap:4,flexWrap:"wrap"}}>{[...new Set(q.questions.map(qq=>qq.type))].map(t=><Tag key={t} label={t}/>)}</div>
+            </div>
+            <button onClick={()=>startQuiz(q)} style={B()}>Start →</button>
+          </div>
+        ))}
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// TEACHER AREA
+// ═══════════════════════════════════════════════════════════════════
+function TeacherArea({classes,updCls,quizzes,updQz,auth,updAuth,logs}) {
+  const [authed,setAuthed]=useState(false); const [pw,setPw]=useState("");
+  const [loginBusy,setLoginBusy]=useState(false); const [loginErr,setLoginErr]=useState("");
+  const [section,setSection]=useState("quizzes");
+  const [changingPw,setChangingPw]=useState(false); const [newPw,setNewPw]=useState(""); const [newPw2,setNewPw2]=useState(""); const [pwMsg,setPwMsg]=useState("");
+  const [newCls,setNewCls]=useState("");
+  const [tTitle,setTTitle]=useState(""); const [tTopic,setTTopic]=useState(""); const [tWords,setTWords]=useState(""); const [tCEFR,setTCEFR]=useState("");
+  const [generating,setGenerating]=useState(false); const [genMsg,setGenMsg]=useState("");
+  const [selQuiz,setSelQuiz]=useState("");
+
+  const login=async()=>{
+    if(!pw.trim()) return;
+    setLoginBusy(true); setLoginErr("");
+    const hash=await sha256(pw);
+    const stored=auth?.pwHash||null;
+    if(!stored){ updAuth({pwHash:hash}); setAuthed(true); setPw(""); }
+    else { if(hash===stored){setAuthed(true);setPw("");}else setLoginErr("Wrong password."); }
+    setLoginBusy(false);
+  };
+
+  const changePassword=async()=>{
+    if(!newPw.trim()){setPwMsg("Please enter a new password.");return;}
+    if(newPw!==newPw2){setPwMsg("Passwords do not match.");return;}
+    if(newPw.length<6){setPwMsg("Min 6 characters.");return;}
+    updAuth({pwHash:await sha256(newPw)});
+    setNewPw("");setNewPw2("");setChangingPw(false);setPwMsg("");
+    alert("Password updated!");
+  };
+
+  if(!authed) return (
+    <div style={{maxWidth:340,margin:"40px auto",textAlign:"center"}}>
+      <div style={{fontSize:44,marginBottom:10}}>🔒</div>
+      <h3 style={{margin:"0 0 6px",color:"#374151"}}>Teacher Login</h3>
+      <p style={{fontSize:12,color:"#9ca3af",marginBottom:16}}>First use: enter any password to set it.</p>
+      <input type="password" value={pw} onChange={e=>{setPw(e.target.value);setLoginErr("");}}
+        onKeyDown={e=>e.key==="Enter"&&login()} placeholder="Enter password"
+        style={{display:"block",width:"100%",padding:"9px 12px",borderRadius:8,border:"1px solid #d1d5db",fontSize:14,boxSizing:"border-box",marginBottom:8}}/>
+      {loginErr&&<div style={{color:"#dc2626",fontSize:13,marginBottom:8}}>{loginErr}</div>}
+      <button onClick={login} disabled={loginBusy}
+        style={{...B(loginBusy?"#9ca3af":"#4f46e5"),width:"100%",padding:10,cursor:loginBusy?"not-allowed":"pointer"}}>
+        {loginBusy?"⏳ Verifying…":"Login"}
+      </button>
+    </div>
+  );
+
+  const generateQuiz=async()=>{
+    if(!tTitle.trim()||!tTopic.trim()||!tWords||!tCEFR) return;
+    setGenerating(true); setGenMsg("⏳ Step 1/2 — Generating passage…");
+    try {
+      const angles=["Focus on historical background and origins.","Focus on recent developments and future outlook.","Focus on causes and effects.","Focus on contrasting perspectives or debates.","Focus on real-world examples and case studies.","Focus on scientific or technical mechanisms.","Focus on social and cultural implications.","Focus on economic impacts and policy responses."];
+      const angle=angles[Math.floor(Math.random()*angles.length)];
+      const seed=Math.random().toString(36).slice(2,8);
+      const text=await callClaude(
+        `You are an expert EFL materials writer. Write a BRAND NEW, UNIQUE English passage for listening practice.\n- Topic: ${tTopic}\n- Angle: ${angle}\n- CEFR level: ${tCEFR}\n- Maximum length: ${tWords} running words\n- Style: engaging, TOEFL lecture-style\n- Variation seed: ${seed}\n- Do NOT include a title or headings.\nReturn ONLY the passage text, nothing else.`,2000);
+      if(!text) throw new Error("Empty passage returned.");
+      setGenMsg("⏳ Step 2/2 — Generating TOEFL questions…");
+      const raw=await callClaude(
+        `You are a TOEFL test designer. Generate 8 MC listening comprehension questions from the passage below.\nInclude a mix of: "Vocabulary","Gist","Main Idea","Factual","Inference","Purpose"\nEach question: 4 options, 1 correct answer.\nReturn ONLY valid JSON, no markdown, no code fences:\n{"questions":[{"type":"Vocabulary","question":"...","options":["A","B","C","D"],"correctIndex":0}]}\n\nPassage:\n${text}`,4000);
+      const parsed=JSON.parse(raw.replace(/```json|```/g,"").trim());
+      if(!parsed.questions?.length) throw new Error("No questions returned.");
+      const quiz={id:Date.now().toString(),title:tTitle,topic:tTopic,cefr:tCEFR,wordCount:tWords,originalText:text,questions:parsed.questions,available:false,createdAt:new Date().toISOString()};
+      updQz([quiz,...quizzes]);
+      setTTitle("");setTTopic("");setTWords("");setTCEFR("");
+      setGenMsg("✅ Quiz created! See list below.");
+    } catch(e) { setGenMsg("❌ "+e.message); }
+    setGenerating(false);
+  };
+
+  const toggleAvail=id=>updQz(quizzes.map(q=>q.id===id?{...q,available:!q.available}:q));
+  const deleteQz=id=>updQz(quizzes.filter(q=>q.id!==id));
+  const addCls=()=>{if(newCls.trim()&&!classes.includes(newCls.trim())){updCls([...classes,newCls.trim()]);setNewCls("");}};
+
+  // Item analysis
+  const quiz=quizzes.find(q=>q.id===selQuiz);
+  const qLogs=logs.filter(l=>l.quizId===selQuiz);
+  const stats=quiz?quiz.questions.map((q,i)=>{
+    const att=qLogs.filter(l=>l.responses?.[i]!==undefined);
+    const cor=att.filter(l=>l.responses[i]===q.correctIndex);
+    return{facility:att.length>0?cor.length/att.length:null,attempted:att.length,optCounts:[0,1,2,3].map(j=>att.filter(l=>l.responses[i]===j).length)};
+  }):[];
+
+  const SECS=[["quizzes","📚 Quizzes"],["classes","👥 Classes"],["texts","📄 Texts"],["analysis","📊 Analysis"]];
+  return (
+    <div>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14,flexWrap:"wrap",gap:8}}>
+        <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+          {SECS.map(([k,l])=>(
+            <button key={k} onClick={()=>setSection(k)} style={{padding:"7px 12px",border:"none",borderRadius:6,cursor:"pointer",fontSize:12,
+              background:section===k?"#1d4ed8":"#e5e7eb",color:section===k?"#fff":"#374151",fontWeight:section===k?"700":"400"}}>{l}</button>
+          ))}
+        </div>
+        <div style={{display:"flex",gap:6}}>
+          <button onClick={()=>setChangingPw(v=>!v)} style={{padding:"6px 10px",background:"none",border:"1px solid #d1d5db",borderRadius:6,cursor:"pointer",fontSize:12}}>🔑 Password</button>
+          <button onClick={()=>setAuthed(false)} style={{padding:"6px 10px",background:"none",border:"1px solid #d1d5db",borderRadius:6,cursor:"pointer",fontSize:12}}>🚪 Logout</button>
+        </div>
+      </div>
+
+      {changingPw&&(
+        <div style={{...CARD,background:"#fefce8",border:"1px solid #fde68a",marginBottom:14}}>
+          <div style={{fontWeight:"600",marginBottom:8}}>🔑 Change Password</div>
+          <input type="password" value={newPw} onChange={e=>setNewPw(e.target.value)} placeholder="New password (min 6 chars)"
+            style={{display:"block",width:"100%",padding:"8px 10px",borderRadius:6,border:"1px solid #d1d5db",fontSize:14,marginBottom:6,boxSizing:"border-box"}}/>
+          <input type="password" value={newPw2} onChange={e=>setNewPw2(e.target.value)} placeholder="Confirm new password"
+            style={{display:"block",width:"100%",padding:"8px 10px",borderRadius:6,border:"1px solid #d1d5db",fontSize:14,marginBottom:6,boxSizing:"border-box"}}/>
+          {pwMsg&&<div style={{color:"#dc2626",fontSize:13,marginBottom:6}}>{pwMsg}</div>}
+          <div style={{display:"flex",gap:8}}>
+            <button onClick={changePassword} style={B("#22c55e",{padding:"7px 14px"})}>✓ Save</button>
+            <button onClick={()=>{setChangingPw(false);setNewPw("");setNewPw2("");setPwMsg("");}} style={{padding:"7px 14px",background:"none",border:"1px solid #d1d5db",borderRadius:6,cursor:"pointer",fontSize:13}}>Cancel</button>
+          </div>
+        </div>
+      )}
+
+      {/* ── QUIZZES ── */}
+      {section==="quizzes"&&(
+        <div>
+          <div style={{...CARD,background:"#f8fafc"}}>
+            <div style={{fontWeight:"600",marginBottom:12}}>➕ Generate New Quiz</div>
+            <input value={tTitle} onChange={e=>setTTitle(e.target.value)} placeholder="Quiz title (e.g. Lecture 1 – Climate Change)"
+              style={{display:"block",width:"100%",padding:"8px 12px",borderRadius:6,border:"1px solid #d1d5db",fontSize:14,marginBottom:8,boxSizing:"border-box"}}/>
+            <input value={tTopic} onChange={e=>setTTopic(e.target.value)} placeholder="Topic (e.g. The impact of social media on mental health)"
+              style={{display:"block",width:"100%",padding:"8px 12px",borderRadius:6,border:"1px solid #d1d5db",fontSize:14,marginBottom:8,boxSizing:"border-box"}}/>
+            <div style={{display:"flex",gap:10,marginBottom:10}}>
+              <div style={{flex:1}}>
+                <label style={{fontSize:12,fontWeight:700,color:"#374151",display:"block",marginBottom:4}}>Max Words</label>
+                <input type="number" placeholder="e.g. 200" min={50} max={500} value={tWords} onChange={e=>setTWords(e.target.value)}
+                  style={{width:"100%",padding:"8px 12px",borderRadius:6,border:"1px solid #d1d5db",fontSize:14,boxSizing:"border-box"}}/>
+              </div>
+              <div style={{flex:1}}>
+                <label style={{fontSize:12,fontWeight:700,color:"#374151",display:"block",marginBottom:4}}>CEFR Level</label>
+                <select value={tCEFR} onChange={e=>setTCEFR(e.target.value)}
+                  style={{width:"100%",padding:"8px 12px",borderRadius:6,border:"1px solid #d1d5db",fontSize:14,background:"white",boxSizing:"border-box"}}>
+                  <option value="">Select…</option>
+                  {["A1","A2","B1","B2","C1","C2"].map(l=><option key={l}>{l}</option>)}
+                </select>
+              </div>
+            </div>
+            {generating&&<div style={{background:"#dbeafe",border:"1px solid #93c5fd",borderRadius:7,padding:"9px 13px",marginBottom:10,fontSize:13,color:"#1e40af"}}>
+              <div style={{fontWeight:700}}>{genMsg}</div>
+              <div style={{opacity:.7,fontSize:12,marginTop:2}}>This may take 20–40 seconds…</div>
+            </div>}
+            <div style={{display:"flex",gap:10,alignItems:"center",flexWrap:"wrap"}}>
+              <button onClick={generateQuiz} disabled={generating||!tTitle.trim()||!tTopic.trim()||!tWords||!tCEFR}
+                style={{...B(generating||!tTitle.trim()||!tTopic.trim()||!tWords||!tCEFR?"#9ca3af":"#4f46e5"),cursor:generating?"not-allowed":"pointer"}}>
+                {generating?"⏳ Generating…":"🤖 Generate Quiz"}
+              </button>
+              {!generating&&genMsg&&<span style={{fontSize:13,color:genMsg.startsWith("✅")?"#16a34a":"#dc2626"}}>{genMsg}</span>}
+            </div>
+          </div>
+          <div style={{fontWeight:"600",marginBottom:10}}>All Quizzes ({quizzes.length})</div>
+          {quizzes.length===0
+            ?<div style={{textAlign:"center",padding:24,color:"#9ca3af",border:"2px dashed #e5e7eb",borderRadius:8}}>No quizzes yet. Generate one above.</div>
+            :quizzes.map(q=>(
+              <div key={q.id} style={{...CARD,display:"flex",justifyContent:"space-between",alignItems:"flex-start",flexWrap:"wrap",gap:10}}>
+                <div>
+                  <div style={{fontWeight:700,color:"#1e3a8a"}}>{q.title}</div>
+                  <div style={{fontSize:12,color:"#94a3b8",marginTop:2}}>{q.questions.length} questions · CEFR {q.cefr} · ~{q.wordCount} words · {new Date(q.createdAt).toLocaleDateString()}</div>
+                  <div style={{display:"flex",gap:4,flexWrap:"wrap",marginTop:5}}>{[...new Set(q.questions.map(qq=>qq.type))].map(t=><Tag key={t} label={t}/>)}</div>
+                </div>
+                <div style={{display:"flex",gap:6,alignItems:"center",flexWrap:"wrap"}}>
+                  <span style={{fontSize:12,padding:"2px 9px",borderRadius:99,fontWeight:700,background:q.available?"#dcfce7":"#fee2e2",color:q.available?"#15803d":"#dc2626"}}>{q.available?"● Available":"● Hidden"}</span>
+                  <button onClick={()=>toggleAvail(q.id)} style={{padding:"5px 10px",border:"none",borderRadius:6,cursor:"pointer",fontSize:12,fontWeight:700,background:q.available?"#fef3c7":"#d1fae5",color:q.available?"#92400e":"#065f46"}}>{q.available?"Hide":"Publish"}</button>
+                  <button onClick={()=>deleteQz(q.id)} style={{padding:"5px 9px",background:"#fee2e2",color:"#dc2626",border:"none",borderRadius:6,cursor:"pointer",fontSize:12}}>🗑</button>
+                </div>
+              </div>
+            ))}
+        </div>
+      )}
+
+      {/* ── CLASSES ── */}
+      {section==="classes"&&(
+        <div>
+          <div style={{display:"flex",gap:8,marginBottom:14}}>
+            <input value={newCls} onChange={e=>setNewCls(e.target.value)} onKeyDown={e=>e.key==="Enter"&&addCls()}
+              placeholder="New class name (e.g. EFL101-A)"
+              style={{flex:1,padding:"8px 12px",borderRadius:6,border:"1px solid #d1d5db",fontSize:14}}/>
+            <button onClick={addCls} style={B()}>+ Add</button>
+          </div>
+          {classes.length===0
+            ?<div style={{textAlign:"center",padding:20,color:"#9ca3af"}}>No classes yet.</div>
+            :classes.map(c=>{
+              const cLogs=logs.filter(l=>l.classId===c);
+              const avg=cLogs.length>0?(cLogs.reduce((a,l)=>a+(l.correctCount/l.totalCount*100),0)/cLogs.length).toFixed(1):null;
+              return(
+                <div key={c} style={{...CARD,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                  <div><div style={{fontWeight:600}}>👥 {c}</div>
+                    <div style={{fontSize:12,color:"#6b7280"}}>{cLogs.length} submission{cLogs.length!==1?"s":""}{avg!==null?` · Avg: ${avg}%`:""}</div>
+                  </div>
+                  <button onClick={()=>updCls(classes.filter(x=>x!==c))} style={{padding:"5px 10px",background:"#fee2e2",color:"#dc2626",border:"none",borderRadius:6,cursor:"pointer",fontSize:12}}>🗑 Remove</button>
+                </div>
+              );
+            })}
+        </div>
+      )}
+
+      {/* ── TEXTS ── */}
+      {section==="texts"&&(
+        <div>
+          <div style={{fontWeight:"600",marginBottom:4}}>📄 Passage Texts</div>
+          <p style={{fontSize:13,color:"#6b7280",marginBottom:14}}>All AI-generated passages. Click ▶ Play to preview audio.</p>
+          {quizzes.length===0
+            ?<div style={{textAlign:"center",padding:24,color:"#9ca3af",border:"2px dashed #e5e7eb",borderRadius:8}}>No texts yet.</div>
+            :quizzes.map((q,idx)=><TextCard key={q.id} q={q} idx={idx}/>)}
+        </div>
+      )}
+
+      {/* ── ANALYSIS ── */}
+      {section==="analysis"&&(
+        <div>
+          <div style={{fontWeight:"600",marginBottom:14}}>📊 Item Analysis</div>
+          <div style={{marginBottom:14}}>
+            <label style={{fontSize:13,fontWeight:700,color:"#374151",display:"block",marginBottom:6}}>Select Quiz</label>
+            <select value={selQuiz} onChange={e=>setSelQuiz(e.target.value)} style={{width:"100%",padding:"9px 12px",borderRadius:6,border:"1px solid #d1d5db",fontSize:14,background:"white"}}>
+              <option value="">— Choose a quiz —</option>
+              {quizzes.map(q=><option key={q.id} value={q.id}>{q.title} ({q.cefr})</option>)}
+            </select>
+          </div>
+          {quiz&&qLogs.length===0&&<div style={{textAlign:"center",padding:20,color:"#9ca3af"}}>No submissions for this quiz yet.</div>}
+          {quiz&&qLogs.length>0&&<>
+            <div style={{...CARD,overflowX:"auto"}}>
+              <div style={{fontWeight:700,color:"#1e40af",marginBottom:10}}>Item Facility &amp; Option Distribution</div>
+              <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
+                <thead><tr style={{background:"#1e40af",color:"white"}}>
+                  {["Item","Type","Attempts","Facility","A","B","C","D"].map(h=><th key={h} style={{padding:"7px 10px",textAlign:h==="Item"||h==="Type"?"left":"center"}}>{h}</th>)}
+                </tr></thead>
+                <tbody>{stats.map((s,i)=>{
+                  const q=quiz.questions[i];
+                  const p=s.facility!==null?(s.facility*100).toFixed(0)+"%":"—";
+                  const pColor=s.facility===null?"#64748b":s.facility>=0.7?"#16a34a":s.facility>=0.4?"#d97706":"#dc2626";
+                  return(
+                    <tr key={i} style={{borderTop:"1px solid #f1f5f9",background:i%2===0?"white":"#f8fafc"}}>
+                      <td style={{padding:"7px 10px",fontWeight:700,color:"#1e3a8a"}}>Q{i+1}</td>
+                      <td style={{padding:"7px 10px"}}><Tag label={q.type}/></td>
+                      <td style={{padding:"7px 10px",textAlign:"center"}}>{s.attempted}</td>
+                      <td style={{padding:"7px 10px",textAlign:"center",fontWeight:700,color:pColor}}>{p}</td>
+                      {s.optCounts.map((c,j)=>(
+                        <td key={j} style={{padding:"7px 10px",textAlign:"center",background:j===q.correctIndex?"#dcfce7":"",fontWeight:j===q.correctIndex?700:400,color:j===q.correctIndex?"#15803d":"#374151"}}>
+                          {s.attempted>0?(c/s.attempted*100).toFixed(0)+"%":"—"}<br/><span style={{color:"#94a3b8",fontSize:10}}>({c})</span>
+                        </td>
+                      ))}
+                    </tr>
+                  );
+                })}</tbody>
+              </table>
+              <div style={{fontSize:11,color:"#94a3b8",marginTop:8}}>Facility: 🟢 ≥70% · 🟡 40–69% · 🔴 &lt;40% · Green column = correct answer</div>
+            </div>
+            <div style={{...CARD,overflowX:"auto"}}>
+              <div style={{fontWeight:700,color:"#1e40af",marginBottom:10}}>Student Response Detail</div>
+              <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
+                <thead><tr style={{background:"#1e40af",color:"white"}}>
+                  <th style={{padding:"7px 10px",textAlign:"left"}}>Class</th>
+                  <th style={{padding:"7px 10px",textAlign:"left"}}>ID</th>
+                  <th style={{padding:"7px 10px",textAlign:"center"}}>Score</th>
+                  {quiz.questions.map((_,i)=><th key={i} style={{padding:"7px 10px",textAlign:"center"}}>Q{i+1}</th>)}
+                  <th style={{padding:"7px 10px",textAlign:"left"}}>Time</th>
+                </tr></thead>
+                <tbody>{qLogs.map((l,ri)=>(
+                  <tr key={ri} style={{borderTop:"1px solid #f1f5f9",background:ri%2===0?"white":"#f8fafc"}}>
+                    <td style={{padding:"7px 10px"}}>{l.classId}</td>
+                    <td style={{padding:"7px 10px",fontWeight:600}}>{l.studentId}</td>
+                    <td style={{padding:"7px 10px",textAlign:"center",fontWeight:700,color:"#1d4ed8"}}>{l.score}</td>
+                    {quiz.questions.map((q,i)=>{
+                      const chosen=l.responses?.[i]; const isC=chosen===q.correctIndex;
+                      return <td key={i} style={{padding:"7px 10px",textAlign:"center",background:isC?"#dcfce7":"#fee2e2",color:isC?"#15803d":"#dc2626",fontWeight:700}}>
+                        {chosen!==undefined&&chosen!==-1?String.fromCharCode(65+chosen):"—"}
+                      </td>;
+                    })}
+                    <td style={{padding:"7px 10px",color:"#94a3b8",whiteSpace:"nowrap",fontSize:11}}>{l.timestamp}</td>
+                  </tr>
+                ))}</tbody>
+              </table>
+            </div>
+          </>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── TextCard ──────────────────────────────────────────────────────
+function TextCard({q,idx}) {
+  const [expanded,setExpanded]=useState(false); const [playing,setPlaying]=useState(false);
+  const wc=q.originalText.trim().split(/\s+/).length;
+  const play=()=>{ speechSynthesis.cancel(); const u=new SpeechSynthesisUtterance(q.originalText);
+    u.lang="en-US"; u.rate=0.85; u.onstart=()=>setPlaying(true); u.onend=()=>setPlaying(false); speechSynthesis.speak(u); };
+  const stop=()=>{ speechSynthesis.cancel(); setPlaying(false); };
+  return (
+    <div style={{...CARD,padding:0,overflow:"hidden"}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"12px 14px",background:"#f8fafc",borderBottom:expanded?"1px solid #e2e8f0":"none",flexWrap:"wrap",gap:8}}>
+        <div style={{flex:1}}>
+          <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:3}}>
+            <span style={{background:"#1d4ed8",color:"white",borderRadius:5,fontWeight:800,fontSize:11,padding:"1px 7px"}}>#{idx+1}</span>
+            <span style={{fontWeight:700,color:"#1e3a8a"}}>{q.title}</span>
+            <span style={{fontSize:11,padding:"1px 7px",borderRadius:99,background:q.available?"#dcfce7":"#fee2e2",color:q.available?"#15803d":"#dc2626",fontWeight:700}}>{q.available?"●Live":"●Hidden"}</span>
+          </div>
+          <div style={{fontSize:12,color:"#6b7280"}}>CEFR {q.cefr} · {wc} words · {q.topic}</div>
+        </div>
+        <div style={{display:"flex",gap:6}}>
+          {!playing?<button onClick={play} style={B("#1d4ed8",{padding:"5px 12px",fontSize:13})}>▶ Play</button>
+                   :<button onClick={stop} style={B("#dc2626",{padding:"5px 12px",fontSize:13})}>■ Stop</button>}
+          <button onClick={()=>setExpanded(e=>!e)} style={{padding:"5px 10px",background:"#eff6ff",color:"#1d4ed8",border:"1px solid #bfdbfe",borderRadius:6,cursor:"pointer",fontSize:12,fontWeight:700}}>
+            {expanded?"▲ Hide":"▼ Show"}
+          </button>
+        </div>
+      </div>
+      {expanded&&<div style={{padding:"14px 16px"}}>
+        <div style={{fontSize:11,fontWeight:700,color:"#94a3b8",letterSpacing:.8,marginBottom:8}}>PASSAGE TEXT</div>
+        <div style={{fontSize:14,color:"#1e293b",lineHeight:2,whiteSpace:"pre-wrap"}}>{q.originalText}</div>
+      </div>}
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// LEARNING LOGS
+// ═══════════════════════════════════════════════════════════════════
+function LogsArea({logs}) {
+  const [col,setCol]=useState("timestamp"); const [asc,setAsc]=useState(false);
+  const COLS=[{k:"classId",l:"Class"},{k:"studentId",l:"Student ID"},{k:"quizTitle",l:"Quiz"},{k:"score",l:"Score"},{k:"timestamp",l:"Time"}];
+  const sorted=[...logs].sort((a,b)=>{ const av=a[col]||"",bv=b[col]||""; return asc?av.localeCompare(bv):bv.localeCompare(av); });
+  const toggleSort=k=>{ if(col===k)setAsc(a=>!a); else{setCol(k);setAsc(true);} };
+  return (
+    <div>
+      <div style={{fontWeight:"600",marginBottom:12}}>Learning Logs <span style={{fontWeight:"400",color:"#6b7280",fontSize:13}}>— {logs.length} records</span></div>
+      {logs.length===0
+        ?<div style={{textAlign:"center",padding:32,color:"#9ca3af",border:"2px dashed #e5e7eb",borderRadius:8}}>No records yet.</div>
+        :<div style={{overflowX:"auto"}}>
+          <table style={{width:"100%",borderCollapse:"collapse",fontSize:14}}>
+            <thead><tr style={{background:"#f1f5f9"}}>
+              {COLS.map(c=>(
+                <th key={c.k} onClick={()=>toggleSort(c.k)} style={{padding:"9px 12px",textAlign:"left",cursor:"pointer",userSelect:"none",
+                  borderBottom:"2px solid #e2e8f0",whiteSpace:"nowrap",color:col===c.k?"#1d4ed8":"#374151",fontWeight:"600"}}>
+                  {c.l} {col===c.k?(asc?"↑":"↓"):<span style={{color:"#cbd5e1"}}>⇅</span>}
+                </th>
+              ))}
+            </tr></thead>
+            <tbody>{sorted.map((l,i)=>(
+              <tr key={i} style={{borderBottom:"1px solid #f1f5f9",background:i%2===0?"#fff":"#f9fafb"}}>
+                <td style={{padding:"8px 12px"}}>{l.classId}</td>
+                <td style={{padding:"8px 12px"}}>{l.studentId}</td>
+                <td style={{padding:"8px 12px"}}>{l.quizTitle}</td>
+                <td style={{padding:"8px 12px",fontWeight:"700",color:"#1d4ed8"}}>{l.score}</td>
+                <td style={{padding:"8px 12px",fontSize:12,color:"#6b7280",whiteSpace:"nowrap"}}>{l.timestamp}</td>
+              </tr>
+            ))}</tbody>
+          </table>
+        </div>}
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+</script>
+</body>
+</html>
